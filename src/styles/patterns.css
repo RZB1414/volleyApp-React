@@ -1,0 +1,10 @@
+.surface-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.15) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+.surface-gradient {
+  background: radial-gradient(circle at top, rgba(52, 211, 153, 0.15), transparent 45%),
+    radial-gradient(circle at 20% 20%, rgba(56, 189, 248, 0.1), transparent 35%),
+    radial-gradient(circle at 80% 0%, rgba(244, 114, 182, 0.1), transparent 25%);
+}
