@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import PageSection from '@/components/PageSection.js'
+import VolleyPdfParser from '@/components/PdfReader.js'
 import { useAuth } from '@/hooks/useAuth.js'
 import { countries } from '@/data/countries.js'
 
@@ -166,6 +167,9 @@ const Dashboard = () => {
             </div>
           ))}
         </div>
+      </PageSection>
+      <PageSection title="Leitor de PDF" description="Faça upload de um PDF e veja os dados extraídos via console.">
+        <VolleyPdfParser />
       </PageSection>
     </div>
   )
