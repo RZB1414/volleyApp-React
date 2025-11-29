@@ -144,7 +144,7 @@ const DownloadTokens = () => {
 
   return (
     <div className="flex flex-col gap-6">
-      <PageSection title="Available files" description="Select a finished upload to generate a download link">
+      <PageSection title="Available files" description="Select a file to start a download">
         {!userId && <p className="text-sm text-rose-300">You must be authenticated to list uploads.</p>}
         {userId && listLoading && <p className="text-sm text-slate-400">Loading completed uploads...</p>}
         {userId && !listLoading && uploads.length === 0 ? (

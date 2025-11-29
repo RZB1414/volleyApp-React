@@ -1,6 +1,5 @@
 import { useRef, useState } from 'react'
 import PageSection from '@/components/PageSection.js'
-import UploadProgressList from '@/components/UploadProgressList.js'
 import { api } from '@/services/api.js'
 import { formatBytes, uploadPartsSequentially } from '@/services/multipartHelper.js'
 import { useAuth } from '@/hooks/useAuth.js'
@@ -30,13 +29,14 @@ const UploadManager = () => {
   const [progress, setProgress] = useState(0)
   const [uploadedBytes, setUploadedBytes] = useState(0)
   const [uploadSpeed, setUploadSpeed] = useState(0)
+  const [recentSuccess, setRecentSuccess] = useState(null)
   const controllerRef = useRef(null)
   const fileInputRef = useRef(null)
   const uploadStartTimeRef = useRef(null)
   const renameInputRef = useRef(null)
   const { userId } = useAuth()
 
-  const reset = () => {
+  const reset = ({ preserveSuccess = false } = {}) => {
     setSession(null)
     setParts([])
     setStatus('idle')
@@ -47,6 +47,13 @@ const UploadManager = () => {
     uploadStartTimeRef.current = null
     setCustomFileBase('')
     setFileExtension('')
+    setFile(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+    if (!preserveSuccess) {
+      setRecentSuccess(null)
+    }
   }
 
   const handleFileChange = (event) => {
@@ -143,7 +150,6 @@ const UploadManager = () => {
         parts: activeParts.map(({ partNumber, ETag }) => ({ partNumber, ETag })),
       })
       
-      setStatus('completed')
       setUploadSpeed(0)
       recordCompletedUpload(userId, {
         fileKey: uploadCompletedResponse?.key ?? activeSession.fileKey,
@@ -153,6 +159,8 @@ const UploadManager = () => {
         size: file?.size ?? activeSession.fileSizeBytes,
         contentType: file?.type ?? activeSession.contentType,
       })
+      setRecentSuccess(`"${resolvedFileName}" uploaded.`)
+      reset({ preserveSuccess: true })
     } catch (err) {
       setError(err.message)
       setStatus('error')
@@ -176,9 +184,6 @@ const UploadManager = () => {
       }
     }
     reset()
-    setFile(null)
-    setCustomFileBase('')
-    setFileExtension('')
   }
 
   const busyStatuses = ['creating', 'uploading', 'finalizing']
@@ -187,7 +192,6 @@ const UploadManager = () => {
   const disableStart = !file || busyStatuses.includes(status) || !trimmedBaseName
 
   return (
-    <div className="flex flex-col gap-6">
       <PageSection title="Upload your video" description="Upload large videos with real-time progress tracking">
         <div className="flex flex-col gap-4">
           <label className="flex flex-col gap-2 text-sm font-semibold text-slate-200">
@@ -269,33 +273,21 @@ const UploadManager = () => {
             )}
           </div>
           {error && <p className="text-sm text-rose-300">{error}</p>}
-          {status === 'completed' && <p className="text-sm text-emerald-300">Upload finished successfully.</p>}
+          {recentSuccess && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
+              <span>{recentSuccess}</span>
+              <button
+                type="button"
+                className="text-emerald-200 transition hover:text-white"
+                onClick={() => setRecentSuccess(null)}
+                aria-label="Dismiss success banner"
+              >
+                ×
+              </button>
+            </div>
+          )}
         </div>
       </PageSection>
-
-      {session && (
-        <PageSection title="Active session" description="Details returned by the API">
-          <dl className="grid gap-4 text-sm text-slate-300 md:grid-cols-2">
-            <div>
-              <dt className="text-slate-500">Upload ID</dt>
-              <dd className="font-mono text-xs text-slate-100">{session.uploadId}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-500">File Key</dt>
-              <dd className="font-mono text-xs text-slate-100">{session.fileKey}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-500">Parts</dt>
-              <dd>{session.partCount}</dd>
-            </div>
-            <div>
-              <dt className="text-slate-500">Chunk size</dt>
-              <dd>{formatBytes(session.chunkSizeBytes)}</dd>
-            </div>
-          </dl>
-        </PageSection>
-      )}
-    </div>
   )
 }
 

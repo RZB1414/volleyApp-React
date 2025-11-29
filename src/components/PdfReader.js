@@ -1,440 +1,815 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
-import pdfWorkerSrc from "pdfjs-dist/legacy/build/pdf.worker.min.js?url";
+import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.min.js?url";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
-// ----------------- CONFIG -----------------
-const MAX_SETS = 5;
-const MIN_SETS = 3;
-const EMPTY = ".";
-const COL_TOLERANCE_PX = 14; // tolerância de agrupamento horizontal
-const Y_TOLERANCE = 2.5;
+const TEAM_HEADER_EXCLUSION_REGEX = /(vote|points|serve|reception|attack|tot|err|pos%|coach|set)/i;
+const SECTION_END_REGEX = /^(Points\s+won|Head\s+Coach|Assistant|Set\s+\d+)/i;
+const STAT_TOKEN_REGEX = /^([+-]?\d+(?:[.,]\d+)?%?)$/;
+const DEFAULT_SET_COLUMNS = 4;
+const MAX_SET_COLUMNS = 5;
 
-// A ordem que esperamos após os sets:
-// [Points.Tot, Points.BP, Points.WL, Serve.Tot, Serve.Err, Serve.Pts,
-// Reception.Tot, Reception.Err, Reception.Pos%, Reception.Exc%,
-// Attack.Tot, Attack.Err, Attack.Blo, Attack.Pts, Attack.Pts%, BK.Pts]
-const POST_SET_FIELDS = [
-  "points_tot", "points_bp", "points_wl",
-  "serve_tot", "serve_err", "serve_pts",
-  "reception_tot", "reception_err", "reception_pos", "reception_exc",
-  "attack_tot", "attack_err", "attack_blo", "attack_pts", "attack_pts_percent",
-  "bk_pts"
-];
+const buildTableColumnLabels = (setCount = DEFAULT_SET_COLUMNS) => {
+  const clampedSets = Math.min(Math.max(1, setCount || DEFAULT_SET_COLUMNS), MAX_SET_COLUMNS);
+  const setColumns = Array.from({ length: clampedSets }, (_, index) => `${index + 1}`);
 
-// ----------------- UTIL -----------------
-const round2 = (v) => Number((v ?? 0).toFixed(2));
-const isIntegerLike = (s) => typeof s === "string" && /^\d+$/.test(s);
-const looksLikeSetVal = (s) => {
-  if (!s) return false;
-  const t = String(s).trim();
-  if (t === "." || t === "-" || t === "—") return false; // treat as missing, not a set value
-  // a set value is normally integer or decimal (ex: 3, 4, 6.3)
-  return /^[+-]?\d+(\.\d+)?$/.test(t);
+  return [
+    ...setColumns,
+    'Vote',
+    'Tot', 'BP', 'W-L',
+    'Tot', 'Err', 'Pts',
+    'Tot', 'Err', 'Pos%', 'Exc%',
+    'Tot', 'Err', 'Blo', 'Pts', 'Pts%', 'BK Pts',
+  ];
 };
-const looksLikeStat = (s) => {
-  if (!s) return false;
-  const t = String(s).trim();
-  if (t === "." || t === "-" || t === "—") return true;
-  if (/^[+-]?\d+(\.\d+)?$/.test(t)) return true; // numbers
-  if (/^\(?\d+(\.\d+)?%?\)?$/.test(t)) return true; // percentages maybe in parentheses
-  if (/^[+-]?\d+$/.test(t)) return true;
-  return false;
+
+const HEADER_BORDER_COLOR = "#1e293b";
+const BODY_BORDER_COLOR = "#e2e8f0";
+
+const COLUMN_TOLERANCE = 14;
+const HEIGHT_TOLERANCE = 5;
+const EMPTY_VALUE_PLACEHOLDER = '.';
+const normalizeTokenText = (value) => {
+  if (typeof value !== "string") return "";
+  return value.replace(/[()]/g, "").trim();
 };
-const toNumberOrNull = (v) => {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  if (s === "." || s === "-" || s === "") return null;
-  if (/^\(?\d+(\.\d+)?%?\)?$/.test(s)) {
-    // keep percentages as strings without parens
-    if (s.includes("%")) return s.replace(/[()]/g, "");
+
+const buildGroupDividerSet = (groups) => {
+  if (!Array.isArray(groups) || !groups.length) return new Set();
+  const indices = [];
+  let cursor = 0;
+
+  groups.forEach((group, idx) => {
+    if (idx > 0) indices.push(cursor);
+    cursor += group.span ?? 0;
+  });
+
+  return new Set(indices);
+};
+
+const mapTokensToColumns = (tokens, columnAnchors, columnLabels) => {
+  const labels = Array.isArray(columnLabels) && columnLabels.length
+    ? columnLabels
+    : buildTableColumnLabels();
+  const safeTokens = Array.isArray(tokens) ? tokens : [];
+
+  if (!Array.isArray(columnAnchors) || columnAnchors.length !== labels.length) {
+    return labels.map((_, index) => {
+      const token = safeTokens[index];
+      const value = normalizeTokenText(token?.text);
+      return value && value.length ? value : EMPTY_VALUE_PLACEHOLDER;
+    });
   }
-  if (/^[+-]?\d+(\.\d+)?$/.test(s)) return Number(s.replace(",", "."));
-  return s;
+
+  const result = labels.map(() => EMPTY_VALUE_PLACEHOLDER);
+  const occupied = new Array(columnAnchors.length).fill(false);
+
+  safeTokens.forEach((token) => {
+    const value = normalizeTokenText(token.text);
+    if (!value) return;
+
+    const width = token.width ?? 0;
+    const height = token.height ?? 0;
+    const start = token.x;
+    const end = start + width;
+    const center = start + width / 2;
+
+    let bestIndex = -1;
+    let bestScore = Infinity;
+
+    columnAnchors.forEach((anchor, index) => {
+      if (occupied[index]) return;
+      const overlapsHorizontally =
+        (start >= anchor.start - COLUMN_TOLERANCE && start <= anchor.end + COLUMN_TOLERANCE) ||
+        (end >= anchor.start - COLUMN_TOLERANCE && end <= anchor.end + COLUMN_TOLERANCE) ||
+        (start <= anchor.start && end >= anchor.end);
+
+      const heightDiff = anchor.height ? Math.abs(anchor.height - height) : 0;
+      const heightPenalty = heightDiff > HEIGHT_TOLERANCE ? heightDiff : 0;
+      const score = Math.abs(anchor.center - center) + heightPenalty + (overlapsHorizontally ? 0 : 25);
+
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    });
+
+    if (bestIndex !== -1) {
+      occupied[bestIndex] = true;
+      result[bestIndex] = value;
+    }
+  });
+
+  return result;
 };
 
-// ----------------- PDF TEXT -> LINES (x,y) -----------------
-function groupLines(items, yTol = Y_TOLERANCE) {
-  const yBuckets = [];
-  const rows = [];
+const groupPlayersByTeam = (players = []) => {
+  if (!Array.isArray(players) || !players.length) return [];
 
-  for (const it of items) {
-    let idx = -1;
-    for (let i = 0; i < yBuckets.length; i++) {
-      if (Math.abs(yBuckets[i] - it.y) <= yTol) {
-        idx = i;
+  const teams = players.reduce((acc, player) => {
+    const teamName = player.team || "Equipe";
+    if (!acc[teamName]) acc[teamName] = [];
+    acc[teamName].push(player);
+    return acc;
+  }, {});
+
+  return Object.entries(teams).map(([team, teamPlayers]) => ({
+    team,
+    players: [...teamPlayers].sort((a, b) => a.number - b.number),
+  }));
+};
+
+function round(value) {
+  return Number((value ?? 0).toFixed(2));
+}
+
+function groupLines(items, tolerance = 2.5) {
+  const rows = [];
+  const yBuckets = [];
+
+  items.forEach((it) => {
+    let bucketIndex = -1;
+
+    for (let i = 0; i < yBuckets.length; i += 1) {
+      if (Math.abs(yBuckets[i] - it.y) <= tolerance) {
+        bucketIndex = i;
         break;
       }
     }
-    if (idx === -1) {
+
+    if (bucketIndex === -1) {
       yBuckets.push(it.y);
       rows.push([it]);
-    } else rows[idx].push(it);
-  }
+    } else {
+      rows[bucketIndex].push(it);
+    }
+  });
 
-  const lineObjs = rows.map((row) => {
+  const lineObjects = rows.map((row) => {
     const sorted = row.sort((a, b) => a.x - b.x);
     return {
-      y: sorted.reduce((s, t) => s + t.y, 0) / sorted.length,
+      y: sorted.reduce((sum, item) => sum + item.y, 0) / sorted.length,
       page: sorted[0].page,
-      tokens: sorted.map((t) => ({
-        text: String(t.str).trim(),
-        x: t.x,
-        width: t.width ?? 0,
-        height: t.height ?? 0
-      }))
+      tokens: sorted.map((token) => ({
+        str: token.str,
+        x: token.x,
+        width: token.width,
+        height: token.height,
+      })),
     };
   });
 
-  // order top->bottom (y decreasing in PDF coord; ensure visually top->bottom)
-  return lineObjs.sort((A, B) => A.page - B.page || B.y - A.y);
+  return lineObjects.sort((a, b) => a.page - b.page || b.y - a.y);
 }
 
-// ----------------- DETECT TEAM HEADER -----------------
-function detectTeamName(lineText) {
-  // match common patterns like "AL AIN - Al Ain" or "SHABAB AHLI DUBAI"
-  const m = lineText.match(/^[A-Z][A-Z0-9\s.'-]{2,40}(?:\s*-\s*[A-Z][A-Z0-9\s.'-]{2,40})?/i);
-  if (!m) return null;
-  // Filter common words that are not team headers
-  const text = m[0].trim();
-  // Basic heuristics: if contains "AL" and length < 40, accept
-  if (/AL\s+/i.test(text) || /DUBAI|SHABAB|AHLI|AIN/i.test(text)) return text;
+function getLineText(line) {
+  return line.tokens
+    .map((token) => token.str.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function detectTeamHeader(text) {
+  if (!text) return null;
+  const normalized = text.replace(/\s{2,}/g, " ").trim();
+  if (!normalized) return null;
+
+  const lower = normalized.toLowerCase();
+  const keywordMatch = TEAM_HEADER_EXCLUSION_REGEX.exec(lower);
+  const trimmedBeforeKeywords = keywordMatch
+    ? normalized.slice(0, keywordMatch.index).trim()
+    : normalized;
+
+  if (!trimmedBeforeKeywords) return null;
+
+  const withoutScores = trimmedBeforeKeywords
+    .replace(/\s*\d+\s*-\s*\d+\s*$/, "")
+    .replace(/\d+$/, "")
+    .trim();
+
+  if (!withoutScores) return null;
+
+  const cleanText = withoutScores
+    .replace(/\d+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  const isValidChunk = (chunk) => /^[A-ZÀ-Ú0-9][A-Za-zÀ-ú0-9' ]*$/.test(chunk);
+
+  if (cleanText.includes("-")) {
+    const parts = cleanText
+      .split("-")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter(isValidChunk);
+
+    if (parts.length >= 1) {
+      return parts.join(" - ");
+    }
+    return null;
+  }
+
+  if (isValidChunk(cleanText)) {
+    return cleanText;
+  }
+
   return null;
 }
 
-// ----------------- PARSE PLAYER LINE (number / name / stat tokens) -----------------
+function isSectionTerminator(text) {
+  return SECTION_END_REGEX.test(text);
+}
+
+function isStatValue(value) {
+  if (!value) return false;
+  const normalized = value.trim();
+  if (!normalized) return false;
+  return normalized === "." || normalized === "-" || STAT_TOKEN_REGEX.test(normalized);
+}
+
+function splitTokenText(token) {
+  const original = token.str ?? token.text ?? "";
+  if (!original.includes(" ")) return [{ ...token, str: original }];
+
+  const parts = original.split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return [{ ...token, str: original }];
+
+  const widthPerChar = (token.width ?? 0) / (original.length || 1);
+  let cursorX = token.x;
+
+  return parts.map((part) => {
+    const estimatedWidth = widthPerChar * part.length || token.width;
+    const piece = {
+      ...token,
+      str: part,
+      x: cursorX,
+      width: estimatedWidth,
+    };
+    cursorX += estimatedWidth + widthPerChar;
+    return piece;
+  });
+}
+
 function parsePlayerLine(line) {
-  const toks = line.tokens.filter(t => t.text && t.text.length);
-  if (!toks.length) return null;
-  // first token must be player number
-  const first = toks[0].text;
-  if (!/^\d{1,3}$/.test(first)) return null;
-  const number = Number(first);
+  const tokens = line.tokens
+    .flatMap((token) => splitTokenText(token))
+    .map((token) => ({
+      text: token.str.trim(),
+      x: token.x,
+      width: token.width ?? 0,
+      height: token.height ?? 0,
+    }))
+    .filter((token) => Boolean(token.text));
 
-  // find index where stat tokens start: first token that looks like a stat (not name)
-  let statStart = -1;
-  for (let i = 1; i < toks.length; i++) {
-    if (looksLikeStat(toks[i].text)) {
-      statStart = i;
-      break;
-    }
+  if (!tokens.length) return null;
+
+  let numberIndex = -1;
+  let numberText = null;
+
+  for (let i = 0; i < Math.min(3, tokens.length); i += 1) {
+    const raw = tokens[i].text.replace(/\s+/g, "");
+    const digits = raw.replace(/[^0-9]/g, "");
+    const remainder = raw.replace(/[0-9]/g, "").replace(/[^A-Za-z]/g, "");
+
+    if (!digits || digits.length > 3) continue;
+    if (remainder && !/^L+$/i.test(remainder)) continue;
+
+    numberIndex = i;
+    numberText = digits;
+    break;
   }
-  if (statStart === -1) statStart = toks.length;
 
-  const nameParts = toks.slice(1, statStart).map(t => t.text);
-  let name = nameParts.join(" ").replace(/\s{2,}/g, " ").trim();
-  // cleanup stray symbols
-  name = name.replace(/[①②③④⑤⑥⑦⑧⑨]/g, "").replace(/[^A-Za-zÀ-ÖØ-öø-ÿ0-9' .-]/g, "").trim();
+  if (numberIndex === -1) return null;
+  const number = Number(numberText);
+  let remainingTokens = tokens.slice(numberIndex + 1);
 
-  const statTokens = toks.slice(statStart).map(t => ({ text: t.text, x: t.x, width: t.width }));
+  while (remainingTokens.length && /^L+$/i.test(remainingTokens[0].text.replace(/[^A-Za-z]/g, ""))) {
+    remainingTokens = remainingTokens.slice(1);
+  }
+
+  const nameParts = [];
+  const statTokens = [];
+  let collectingStats = false;
+
+  remainingTokens.forEach((token) => {
+    if (!collectingStats && !isStatValue(token.text)) {
+      const normalized = token.text.replace(/[^A-Za-zÀ-ÿ'\-\s]/g, "");
+      if (!normalized) return;
+      nameParts.push(token.text);
+      return;
+    }
+    collectingStats = true;
+    statTokens.push(token);
+  });
+
+  const name = nameParts.join(" ").trim();
+  if (!name) return null;
 
   return {
     number,
     name,
+    rawStats: statTokens.map((token) => token.text),
+    lineText: getLineText(line),
     statTokens,
-    rawStats: statTokens.map(t => t.text),
-    lineText: toks.map(t => t.text).join(" ")
   };
 }
 
-// ----------------- DETECT SET COUNT (OPÇÃO A: MAIOR CONSECUTIVO) -----------------
-function detectSetCountFromPlayers(players) {
-  let max = MIN_SETS;
-  for (const p of players) {
-    let cnt = 0;
-    for (const tok of p.rawStats) {
-      if (looksLikeSetVal(tok)) cnt++;
-      else break;
-    }
-    if (cnt > max) max = cnt;
+function inferColumnAnchors(players, lines, currentSetCount = DEFAULT_SET_COLUMNS) {
+  const headerResult = inferAnchorsFromHeader(lines);
+  if (headerResult) return headerResult;
+
+  const columnLabels = buildTableColumnLabels(currentSetCount);
+
+  if (!Array.isArray(players) || !players.length) {
+    return { anchors: null, detectedSetCount: currentSetCount };
   }
-  return Math.min(MAX_SETS, Math.max(MIN_SETS, max));
+
+  const candidateTokens = players
+    .map((player) => player.statTokens?.filter((token) => token?.text?.trim()) || [])
+    .filter((tokens) => tokens.length >= columnLabels.length)
+    .sort((a, b) => b.length - a.length)[0];
+
+  if (!candidateTokens) {
+    return { anchors: null, detectedSetCount: currentSetCount };
+  }
+
+  const anchors = columnLabels.map((_, index) => {
+    const token = candidateTokens[index];
+    const width = token.width ?? 0;
+    return {
+      start: token.x,
+      end: token.x + width,
+      center: token.x + width / 2,
+      height: token.height ?? 0,
+    };
+  });
+
+  return { anchors, detectedSetCount: currentSetCount };
 }
 
-// ----------------- INFER COLUMN ANCHORS (cluster por x) -----------------
-function inferColumnAnchors(players, setCount) {
-  // want anchors for: setCount + POST_SET_FIELDS.length columns
-  const needed = setCount + POST_SET_FIELDS.length;
-  const allTokens = players.flatMap(p => p.statTokens || []);
-  if (!allTokens.length) return null;
+function inferAnchorsFromHeader(lines) {
+  if (!Array.isArray(lines) || !lines.length) return null;
+  const headerLine = lines.find((line) => {
+    const text = getLineText(line).toLowerCase();
+    return text.includes("pos%") && text.includes("vote") && text.includes("blo");
+  });
 
-  // build array of x centers
-  const centers = allTokens.map(t => ({ center: t.x + (t.width ?? 0) / 2, w: t.width ?? 0 }));
+  if (!headerLine) return null;
 
-  // sort centers
-  centers.sort((a, b) => a.center - b.center);
+  const flattenedTokens = headerLine.tokens
+    .flatMap((token) => splitTokenText(token))
+    .map((token) => ({
+      text: token.str.trim(),
+      x: token.x,
+      width: token.width ?? 0,
+      height: token.height ?? 0,
+    }))
+    .filter((token) => Boolean(token.text));
 
-  // cluster by proximity
-  const clusters = [];
-  let bucket = [centers[0]];
-  for (let i = 1; i < centers.length; i++) {
-    const prev = centers[i - 1];
-    const cur = centers[i];
-    if (Math.abs(cur.center - prev.center) <= COL_TOLERANCE_PX) {
-      bucket.push(cur);
-    } else {
-      clusters.push(bucket);
-      bucket = [cur];
-    }
-  }
-  clusters.push(bucket);
+  const firstDataIndex = flattenedTokens.findIndex((token) => token.text === "1");
+  if (firstDataIndex === -1) return null;
 
-  // if clusters < needed, try merging small gaps by increasing tolerance a bit
-  let tolIncrement = 0;
-  while (clusters.length > needed && tolIncrement <= 20) {
-    // remove smallest cluster (least members) until matches needed
-    clusters.sort((a, b) => b.length - a.length);
-    clusters.pop();
-    tolIncrement++;
-  }
-  while (clusters.length < needed && tolIncrement <= 40) {
-    // merge nearest clusters
-    if (clusters.length <= 1) break;
-    let minDist = Infinity;
-    let idx = -1;
-    for (let i = 0; i < clusters.length - 1; i++) {
-      const a = average(clusters[i].map(c => c.center));
-      const b = average(clusters[i + 1].map(c => c.center));
-      const d = Math.abs(b - a);
-      if (d < minDist) { minDist = d; idx = i; }
-    }
-    if (idx >= 0) {
-      clusters[idx] = clusters[idx].concat(clusters[idx + 1]);
-      clusters.splice(idx + 1, 1);
-    } else break;
-    tolIncrement++;
-  }
+  const dataTokens = flattenedTokens.slice(firstDataIndex);
+  if (!dataTokens.length) return null;
 
-  // sort clusters left->right
-  clusters.sort((a, b) => average(a.map(x => x.center)) - average(b.map(x => x.center)));
+  const firstVoteIndex = dataTokens.findIndex((token) => token.text.toLowerCase() === "vote");
+  const setCount = firstVoteIndex > 0 ? firstVoteIndex : DEFAULT_SET_COLUMNS;
+  const columnLabels = buildTableColumnLabels(setCount);
 
-  // trim/pad to needed
-  if (clusters.length > needed) clusters.splice(needed);
-  while (clusters.length < needed) {
-    // pad with evenly spaced anchors to the right (rare)
-    const last = clusters[clusters.length - 1] || [{ center: 100 }];
-    clusters.push([{ center: last[0].center + 30 }]);
-  }
+  if (dataTokens.length < columnLabels.length) return null;
 
-  // return anchor centers
-  return clusters.map(c => ({ center: average(c.map(x => x.center)) }));
+  const anchors = columnLabels.map((_, index) => {
+    const token = dataTokens[index];
+    const width = token.width ?? 0;
+    return {
+      start: token.x,
+      end: token.x + width,
+      center: token.x + width / 2,
+      height: token.height ?? 0,
+    };
+  });
+
+  return { anchors, detectedSetCount: setCount };
 }
 
-function average(arr) {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
+function extractPlayers(lines) {
+  const playersFound = [];
+  let currentTeam = null;
+  let lastPlayerLineIndex = -1;
+  let playersTotalCount = 0;
 
-// ----------------- MAP STAT TOKENS INTO COLUMNS USING ANCHORS -----------------
-function mapStatTokensToColumns(statTokens, anchors, setCount) {
-  const cols = Array(setCount + POST_SET_FIELDS.length).fill(EMPTY);
-  if (!anchors || !anchors.length || !statTokens || !statTokens.length) return cols;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const text = getLineText(line);
+    if (!text) continue;
 
-  for (const tk of statTokens) {
-    const center = tk.x + (tk.width ?? 0) / 2;
-    // find closest anchor
-    let best = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < anchors.length; i++) {
-      const d = Math.abs(center - anchors[i].center);
-      if (d < bestDist) { bestDist = d; best = i; }
+    const normalizedText = text.toLowerCase();
+
+    if (normalizedText.includes("players total")) {
+      playersTotalCount += 1;
+      if (playersTotalCount >= 2) {
+        const cutoffIndex = lastPlayerLineIndex >= 0 ? lastPlayerLineIndex : index - 1;
+        return { players: playersFound, lastPlayerLineIndex: cutoffIndex };
+      }
+      currentTeam = null;
+      continue;
     }
-    cols[best] = tk.text;
+
+    const teamHeader = detectTeamHeader(text);
+    if (teamHeader) {
+      currentTeam = teamHeader;
+      continue;
+    }
+
+    if (isSectionTerminator(text)) {
+      currentTeam = null;
+      continue;
+    }
+
+    if (!currentTeam) continue;
+
+    const possiblePlayer = parsePlayerLine(line);
+    if (!possiblePlayer) continue;
+
+    playersFound.push({ ...possiblePlayer, team: currentTeam });
+    lastPlayerLineIndex = index;
   }
-  return cols;
+
+  return { players: playersFound, lastPlayerLineIndex };
 }
 
-// ----------------- MAP COLUMNS TO FINAL MODEL -----------------
-function columnsToModel(cols, setCount) {
-  // cols: array length setCount + POST_SET_FIELDS.length
-  const sets = cols.slice(0, setCount).map(c => toNumberOrNull(c) ?? null);
-  const after = cols.slice(setCount);
+function logPlayersToConsole(fileName, playersList) {
+  console.groupCollapsed(`[PDF] ${fileName} :: players found (${playersList.length})`);
+  if (!playersList.length) {
+    console.warn("No player identified.");
+    console.groupEnd();
+    return;
+  }
 
-  const model = {
-    sets,
-    points: {
-      tot: toNumberOrNull(after[0]),
-      bp: toNumberOrNull(after[1]),
-      wl: after[2] && after[2] !== EMPTY ? after[2] : null
-    },
-    serve: {
-      tot: toNumberOrNull(after[3]),
-      err: toNumberOrNull(after[4]),
-      pts: toNumberOrNull(after[5])
-    },
-    reception: {
-      tot: toNumberOrNull(after[6]),
-      err: toNumberOrNull(after[7]),
-      pos: after[8] ? String(after[8]).replace(/[()]/g, "") : null,
-      exc: after[9] ? String(after[9]).replace(/[()]/g, "") : null
-    },
-    attack: {
-      tot: toNumberOrNull(after[10]),
-      err: toNumberOrNull(after[11]),
-      blo: toNumberOrNull(after[12]),
-      pts: toNumberOrNull(after[13]),
-      ptsPercent: after[14] ? String(after[14]).replace(/[()]/g, "") : null
-    },
-    bk: {
-      pts: toNumberOrNull(after[15])
-    }
-  };
+  const grouped = playersList.reduce((acc, player) => {
+    if (!acc[player.team]) acc[player.team] = [];
+    acc[player.team].push(player);
+    return acc;
+  }, {});
 
-  return model;
+  Object.entries(grouped).forEach(([team, players]) => {
+    console.groupCollapsed(`${team} (${players.length})`);
+    players.forEach((player) => {
+      console.log(`#${player.number} ${player.name}`, player.rawStats);
+      console.debug("Linha bruta:", player.lineText);
+    });
+    console.groupEnd();
+  });
+
+  console.groupEnd();
 }
 
-// ----------------- MAIN COMPONENT -----------------
-export default function VolleyPdfParserFinal() {
-  const [results, setResults] = useState([]); // array of players final objects
+function logTokensBeforeFiltering(lines) {
+  console.groupCollapsed(`[PDF] Tokens brutos :: ${lines.length} linhas`);
+  lines.forEach((line, lineIndex) => {
+    console.groupCollapsed(
+      `Linha ${lineIndex + 1} :: página ${line.page} :: y=${line.y}`,
+    );
+    line.tokens.forEach((token, tokenIndex) => {
+      console.log(`#${tokenIndex}`, {
+        text: token.str,
+        x: token.x,
+        width: token.width,
+        height: token.height,
+        lineY: line.y,
+      });
+    });
+    console.groupEnd();
+  });
+  console.groupEnd();
+}
+
+export default function VolleyPdfParser() {
+  const [players, setPlayers] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [setColumnCount, setSetColumnCount] = useState(DEFAULT_SET_COLUMNS);
+  const [isUploadVisible, setIsUploadVisible] = useState(true);
 
-  async function onFile(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    await processFile(f);
+  const columnLabels = buildTableColumnLabels(setColumnCount);
+  const groupedPlayers = groupPlayersByTeam(players);
+
+  // -------------------------------
+  // HANDLE FILE UPLOAD
+  // -------------------------------
+  async function onFileChange(e) {
+    const file = e.target.files[0];
+    const success = await parsePDF(file);
+    if (success) {
+      setIsUploadVisible(false);
+    }
   }
 
-  async function processFile(file) {
-    setLoading(true);
-    setError(null);
-    setResults([]);
-
+  // -------------------------------
+  // PARSE PDF
+  // -------------------------------
+  async function parsePDF(pdfFile) {
     try {
-      const data = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data }).promise;
+      setLoading(true);
+      setError(null);
+      setPlayers([]);
+
+      const buffer = await pdfFile.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
 
       const items = [];
-      for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p);
+
+      // Extract all text + position from all pages
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
         const content = await page.getTextContent();
+
         for (const it of content.items) {
           const width = typeof it.width === "number" ? it.width : Math.abs(it.transform[0]);
           const height = typeof it.height === "number" ? it.height : Math.abs(it.transform[3]);
           items.push({
             str: it.str,
-            x: round2(it.transform[4]),
-            y: round2(it.transform[5]),
-            width: round2(width),
-            height: round2(height),
-            page: p
+            x: round(it.transform[4]),
+            y: round(it.transform[5]),
+            width: round(width),
+            height: round(height),
+            page: pageNum,
           });
         }
       }
 
       const lines = groupLines(items);
+      const { players: parsedPlayers, lastPlayerLineIndex } = extractPlayers(lines);
+      const relevantLines =
+        typeof lastPlayerLineIndex === "number" && lastPlayerLineIndex >= 0
+          ? lines.slice(0, lastPlayerLineIndex + 1)
+          : lines;
 
-      // scan lines: detect teams and players
-      const players = [];
-      let currentTeam = null;
-      for (const line of lines) {
-        const txt = line.tokens.map(t => t.text).join(" ").trim();
-        if (!txt) continue;
+      logTokensBeforeFiltering(relevantLines);
 
-        const maybeTeam = detectTeamName(txt);
-        if (maybeTeam) {
-          currentTeam = maybeTeam;
-          continue;
-        }
-        if (!currentTeam) continue;
+      const { anchors: columnAnchors, detectedSetCount } = inferColumnAnchors(
+        parsedPlayers,
+        relevantLines,
+        setColumnCount,
+      );
+      const effectiveSetCount = detectedSetCount || DEFAULT_SET_COLUMNS;
+      const effectiveColumnLabels = buildTableColumnLabels(effectiveSetCount);
+      setSetColumnCount(effectiveSetCount);
 
-        // section terminator: 'Set 1' or 'Players total' etc -> stop team
-        if (/^Set\s*1\b/i.test(txt) || /^Players\s+total/i.test(txt) || /^Head Coach/i.test(txt)) {
-          currentTeam = null;
-          continue;
-        }
+      const normalizedPlayers = parsedPlayers.map((player) => ({
+        ...player,
+        columnValues: mapTokensToColumns(player.statTokens, columnAnchors, effectiveColumnLabels),
+      }));
 
-        const parsed = parsePlayerLine(line);
-        if (!parsed) continue;
-        parsed.team = currentTeam;
-        players.push(parsed);
+      if (!normalizedPlayers.length) {
+        setError("No player could be found on this PDF.");
+      } else {
+        setError(null);
       }
 
-      if (!players.length) {
-        setError("Nenhum jogador detectado — verifique o PDF.");
-        setLoading(false);
-        return;
-      }
+      logPlayersToConsole(pdfFile.name, normalizedPlayers);
+      setPlayers(normalizedPlayers);
 
-      // detect set count (OPÇÃO A: maior número consecutivo de tokens tipo set)
-      const setCount = detectSetCountFromPlayers(players);
-      console.log("DETECTED SET COUNT:", setCount);
-
-      // infer anchors
-      const anchors = inferColumnAnchors(players, setCount);
-      console.log("Inferred anchors:", anchors);
-
-      // map tokens -> columns and generate final model
-      const final = players.map((p) => {
-        const cols = mapStatTokensToColumns(p.statTokens, anchors, setCount);
-        const model = columnsToModel(cols, setCount);
-        const finalObj = {
-          team: p.team,
-          number: p.number,
-          name: p.name,
-          rawStats: p.rawStats,
-          columns: cols,
-          model
-        };
-        // detailed console logs for debugging/adjustment
-        console.groupCollapsed(`#${p.number} ${p.name} (${p.team})`);
-        console.log("rawStats:", p.rawStats);
-        console.log("mappedColumns:", cols);
-        console.log("finalModel:", model);
-        console.groupEnd();
-        return finalObj;
-      });
-
-      setResults(final);
       setLoading(false);
+      return true;
     } catch (err) {
       console.error(err);
-      setError("Erro ao processar PDF: " + (err.message || err));
+      setError("Upload failed.");
       setLoading(false);
+      return false;
     }
   }
 
+  function handleShowUploadInput() {
+    setIsUploadVisible(true);
+  }
+
+  // -------------------------------
+  // UI
+  // -------------------------------
   return (
-    <div style={{ padding: 16 }}>
-      <h2>Volley PDF Parser — Final (detecção automática de sets)</h2>
+    <div style={{ padding: 16, maxWidth: 900 }}>
 
-      <input type="file" accept="application/pdf" onChange={onFile} />
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "center",
+          marginBottom: 12,
+        }}
+      >
+        {isUploadVisible ? (
+          <>
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "0 16px",
+                height: 38,
+                borderRadius: 999,
+                border: "1px dashed #94a3b8",
+                background: "#ffffff",
+                color: "#0f172a",
+                fontWeight: 600,
+                cursor: "pointer",
+                position: "relative",
+              }}
+            >
+              Upload Match Report
+              <input
+                type="file"
+                accept="application/pdf"
+                onChange={onFileChange}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  opacity: 0,
+                  cursor: "pointer",
+                }}
+              />
+            </label>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={handleShowUploadInput}
+            aria-label="Adicionar novo PDF"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 30,
+              height: 30,
+              borderRadius: "999px",
+              border: "1px solid #94a3b8",
+              background: "#f8fafc",
+              color: "#0f172a",
+              cursor: "pointer",
+            }}
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M12 5v14M5 12h14"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        )}
+      </div>
 
-      {loading && <p>Processando PDF...</p>}
+      {loading && <p>Reading File...</p>}
       {error && <p style={{ color: "red" }}>{error}</p>}
 
-      <div style={{ marginTop: 16 }}>
-        <h3>Resultados ({results.length} jogadores)</h3>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", minWidth: 900, width: "100%" }}>
-            <thead>
-              <tr style={{ background: "#0f172a", color: "white" }}>
-                <th style={headCell}>Team</th>
-                <th style={headCell}>#</th>
-                <th style={headCell}>Name</th>
-                <th style={headCell}>RawStats</th>
-                <th style={headCell}>Sets / Model</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((r, i) => (
-                <tr key={i}>
-                  <td style={cell}>{r.team}</td>
-                  <td style={cell}>{r.number}</td>
-                  <td style={cell}>{r.name}</td>
-                  <td style={cell}><pre style={{ margin: 0 }}>{JSON.stringify(r.rawStats)}</pre></td>
-                  <td style={cell}><pre style={{ margin: 0 }}>{JSON.stringify(r.model, null, 2)}</pre></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {groupedPlayers.length === 0 ? (
+        <p style={{ color: "#475569" }}></p>
+      ) : (
+        groupedPlayers.map(({ team, players: teamPlayers }) => {
+          const upperHeaderCells = [
+            { key: "team", label: team, span: 2 },
+            { key: "set", label: "Set", span: setColumnCount },
+            { key: "vote", label: "Vote", span: 1 },
+            { key: "points", label: "Points", span: 3 },
+            { key: "serve", label: "Serve", span: 3 },
+            { key: "reception", label: "Reception", span: 4 },
+            { key: "attack", label: "Attack", span: 5 },
+            { key: "bkpts", label: "BK Pts", span: 1 },
+          ];
+          const dividerSet = buildGroupDividerSet(upperHeaderCells);
+
+          return (
+            <section key={team} style={{ marginBottom: 32 }}>
+              <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+                <h4 style={{ margin: 0 }}>{team}</h4>
+                <span style={{ fontSize: 13, color: "#475569" }}>{teamPlayers.length} atletas</span>
+              </header>
+              <div style={{ overflowX: "auto", marginTop: 12 }}>
+                <table
+                  style={{
+                    width: "100%",
+                    borderCollapse: "collapse",
+                    fontSize: 14,
+                    minWidth: 480,
+                  }}
+                >
+                  <thead>
+                    <tr style={{ background: "#0f172a", color: "#e2e8f0" }}>
+                      {upperHeaderCells.map(({ key, label, span }, index) => (
+                        <th
+                          key={`${team}-${key}`}
+                          colSpan={span}
+                          style={{
+                            textAlign: "left",
+                            padding: "8px 10px",
+                            borderLeft: index === 0 ? "none" : `1px solid ${HEADER_BORDER_COLOR}`,
+                          }}
+                        >
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                    <tr style={{ background: "#1e293b", color: "#e2e8f0" }}>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          width: 60,
+                          position: "sticky",
+                          left: 0,
+                          background: "#1e293b",
+                          zIndex: 2,
+                        }}
+                      >
+                        Nº
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          borderLeft: dividerSet.has(1) ? `1px solid ${HEADER_BORDER_COLOR}` : "none",
+                        }}
+                      >
+                        Nome
+                      </th>
+                      {columnLabels.map((label, index) => (
+                        <th
+                          key={`${team}-header-${index}`}
+                          style={{
+                            textAlign: "left",
+                            padding: "8px 10px",
+                            borderLeft: dividerSet.has(index + 2)
+                              ? `1px solid ${HEADER_BORDER_COLOR}`
+                              : "none",
+                          }}
+                        >
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                <tbody>
+                  {teamPlayers.map((player) => (
+                    <tr
+                      key={`${team}-${player.number}-${player.name}`}
+                      title={player.lineText}
+                    >
+                      <td
+                        style={{
+                          padding: "8px 10px",
+                          fontWeight: 600,
+                          position: "sticky",
+                          left: 0,
+                          background: "#1e293b",
+                          zIndex: 1,
+                        }}
+                      >
+                        {player.number}
+                      </td>
+                      <td
+                        style={{
+                          padding: "8px 10px",
+                          borderLeft: dividerSet.has(1) ? `1px solid ${BODY_BORDER_COLOR}` : "none",
+                        }}
+                      >
+                        {player.name}
+                      </td>
+                      {player.columnValues.map((value, index) => (
+                        <td
+                          key={`${player.number}-${index}`}
+                          style={{
+                            padding: "8px 10px",
+                            borderLeft: dividerSet.has(index + 2)
+                              ? `1px solid ${BODY_BORDER_COLOR}`
+                              : "none",
+                          }}
+                        >
+                          <div style={{ fontFamily: "monospace", fontSize: 13 }}>
+                            {value}
+                          </div>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+        })
+      )}
+
     </div>
   );
 }
-
-// styles
-const headCell = { padding: 8, fontWeight: 700, border: "1px solid #1f2937" };
-const cell = { padding: 8, border: "1px solid #e6eef7", verticalAlign: "top", fontFamily: "monospace" };

@@ -3,9 +3,8 @@ import { useAuth } from '@/hooks/useAuth.js'
 
 const authedLinks = [
   { to: '/', label: 'Dashboard' },
-  { to: '/upload', label: 'Upload Manager' },
-  { to: '/pending', label: 'Pending Uploads' },
-  { to: '/download', label: 'Download Videos' },
+  { to: '/videos', label: 'Videos' },
+  { to: '/profile', label: 'Profile' },
 ]
 
 const guestLinks = [
@@ -20,7 +19,7 @@ const buildClass = ({ isActive }) =>
 
 const NavigationBar = () => {
   const navigate = useNavigate()
-  const { isAuthenticated, logout, user } = useAuth()
+  const { isAuthenticated, logout } = useAuth()
 
   const handleLogout = () => {
     logout()
@@ -32,7 +31,6 @@ const NavigationBar = () => {
       <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4">
         <Link to="/" className="flex flex-col">
           <span className="text-lg font-bold tracking-tight text-white">Volley Plus Console</span>
-          <span className="text-xs uppercase tracking-widest text-slate-400">API Control Center</span>
         </Link>
         <nav className="flex flex-1 items-center justify-end gap-2">
           {(isAuthenticated ? authedLinks : guestLinks).map((link) => (
@@ -41,8 +39,43 @@ const NavigationBar = () => {
             </NavLink>
           ))}
           {isAuthenticated && (
-            <button type="button" onClick={handleLogout} className="btn-secondary text-sm">
-              Logout {user?.name ? `(${user.name})` : ''}
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="btn-secondary text-sm inline-flex items-center justify-center"
+              aria-label="Logout"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                className="text-current"
+              >
+                <path
+                  d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M10 17l5-5-5-5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M15 12H3"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="sr-only">Logout</span>
             </button>
           )}
         </nav>
