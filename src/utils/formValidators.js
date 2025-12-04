@@ -19,14 +19,11 @@ export const validateRegister = ({ name, email, password, age, yearsAsAProfessio
   if (age && (Number(age) < 10 || Number(age) > 100)) {
     errors.age = 'Age must be between 10 and 100'
   }
-  if (
-    yearsAsAProfessional !== undefined &&
-    yearsAsAProfessional !== null &&
-    yearsAsAProfessional !== ''
-  ) {
-    const numericYears = Number(yearsAsAProfessional)
-    if (Number.isNaN(numericYears) || numericYears < 0 || numericYears > 80) {
-      errors.yearsAsAProfessional = 'Years must be between 0 and 80'
+  if (yearsAsAProfessional) {
+    const numericYear = Number(yearsAsAProfessional)
+    const currentYear = new Date().getFullYear()
+    if (Number.isNaN(numericYear) || numericYear < 1950 || numericYear > currentYear) {
+      errors.yearsAsAProfessional = `Year must be between 1950 and ${currentYear}`
     }
   }
   if (!password || password.length < 9) {

@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.min.js?url";
+import { api } from "../services/api";
+import MatchReportTable from "./MatchReportTable.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
@@ -17,35 +19,99 @@ const buildTableColumnLabels = (setCount = DEFAULT_SET_COLUMNS) => {
   return [
     ...setColumns,
     'Vote',
-    'Tot', 'BP', 'W-L',
-    'Tot', 'Err', 'Pts',
-    'Tot', 'Err', 'Pos%', 'Exc%',
-    'Tot', 'Err', 'Blo', 'Pts', 'Pts%', 'BK Pts',
+    'Points Tot', 'Brake Points', 'Points Won - Lost',
+    'Serves Tot', 'Serves Err', 'Serves Pts',
+    'Receptions Tot', 'Receptions Err', 'Receptions Pos%', 'Receptions Exc%',
+    'Attacks Tot', 'Attacks Err', 'Attacks Blocked', 'Attacks Pts', 'Attacks Pts%', 'BK Pts',
   ];
 };
-
-const HEADER_BORDER_COLOR = "#1e293b";
-const BODY_BORDER_COLOR = "#e2e8f0";
 
 const COLUMN_TOLERANCE = 14;
 const HEIGHT_TOLERANCE = 5;
 const EMPTY_VALUE_PLACEHOLDER = '.';
+const DATE_REGEX = /(?:(?:date|data)\s*[:-]?\s*)?(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i;
+const TIME_REGEX = /(?:(?:time|hora|horário|horario)\s*[:-]?\s*)?((?:[01]?\d|2[0-3])[:,h]\d{2}(?:[:,h]\d{2})?\s*(?:am|pm)?)\b/i;
 const normalizeTokenText = (value) => {
   if (typeof value !== "string") return "";
   return value.replace(/[()]/g, "").trim();
 };
 
-const buildGroupDividerSet = (groups) => {
-  if (!Array.isArray(groups) || !groups.length) return new Set();
-  const indices = [];
-  let cursor = 0;
+const pad = (value) => String(value).padStart(2, '0');
 
-  groups.forEach((group, idx) => {
-    if (idx > 0) indices.push(cursor);
-    cursor += group.span ?? 0;
-  });
+const formatDateForInput = (rawDate) => {
+  if (!rawDate) return null;
+  const separators = /[./-]/;
+  const parts = rawDate.split(separators).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 3) return null;
+  let [day, month, year] = parts.map((value) => Number(value));
 
-  return new Set(indices);
+  if (!day || !month || !year) return null;
+  if (year < 100) {
+    year += year >= 70 ? 1900 : 2000;
+  }
+  if (month > 12 && day <= 12) {
+    [day, month] = [month, day];
+  }
+  if (day > 31 || month > 12) return null;
+  return `${year}-${pad(month)}-${pad(day)}`;
+};
+
+const formatTimeForInput = (rawTime) => {
+  if (!rawTime) return null;
+  const trimmed = rawTime.trim().toLowerCase();
+  const meridiemMatch = trimmed.match(/(am|pm)$/);
+  const meridiem = meridiemMatch ? meridiemMatch[1] : null;
+  const numericPart = trimmed
+    .replace(/(am|pm)$/i, '')
+    .replace(/h/gi, ':')
+    .replace(/\s+/g, '')
+    .trim();
+  const segments = numericPart.split(':').filter(Boolean);
+  if (!segments.length) return null;
+  let hours = Number(segments[0]);
+  const minutes = Number(segments[1] ?? 0);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+
+  if (meridiem) {
+    if (meridiem === 'pm' && hours < 12) hours += 12;
+    if (meridiem === 'am' && hours === 12) hours = 0;
+  }
+  hours = hours % 24;
+  return `${pad(hours)}:${pad(minutes)}`;
+};
+
+const detectMatchMetadata = (lines = []) => {
+  if (!Array.isArray(lines) || !lines.length) {
+    return { date: null, time: null };
+  }
+
+  let detectedDate = null;
+  let detectedTime = null;
+
+  for (const line of lines) {
+    const text = getLineText(line);
+    if (!text) continue;
+
+    if (!detectedDate) {
+      const dateMatch = DATE_REGEX.exec(text);
+      if (dateMatch) {
+        detectedDate = formatDateForInput(dateMatch[1]);
+      }
+    }
+
+    if (!detectedTime) {
+      const timeMatch = TIME_REGEX.exec(text);
+      if (timeMatch) {
+        detectedTime = formatTimeForInput(timeMatch[1]);
+      }
+    }
+
+    if (detectedDate && detectedTime) {
+      break;
+    }
+  }
+
+  return { date: detectedDate, time: detectedTime };
 };
 
 const mapTokensToColumns = (tokens, columnAnchors, columnLabels) => {
@@ -118,6 +184,56 @@ const groupPlayersByTeam = (players = []) => {
     team,
     players: [...teamPlayers].sort((a, b) => a.number - b.number),
   }));
+};
+
+const formatValidationErrors = (errors) => {
+  if (!errors) return "";
+  if (typeof errors === "string") return errors;
+  if (Array.isArray(errors)) return errors.filter(Boolean).join(", ");
+  if (typeof errors === "object") {
+    return Object.values(errors)
+      .flatMap((value) => {
+        if (Array.isArray(value)) return value;
+        if (typeof value === "string") return [value];
+        if (value && typeof value === "object") return Object.values(value);
+        return [];
+      })
+      .filter(Boolean)
+      .join(", ");
+  }
+  return String(errors);
+};
+
+const buildMatchReportPayload = ({
+  playersData = [],
+  columnLabels = [],
+  setColumns = DEFAULT_SET_COLUMNS,
+  matchDateValue,
+  matchTimeValue,
+}) => {
+  const grouped = groupPlayersByTeam(playersData);
+  const safeLabels = Array.isArray(columnLabels) ? columnLabels : [];
+  const normalizedDate = matchDateValue || null;
+  const normalizedTime = matchTimeValue || null;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    setColumns,
+    columnLabels: safeLabels,
+    matchDate: normalizedDate,
+    matchTime: normalizedTime,
+    teams: grouped.map(({ team, players }) => ({
+      team,
+      players: players.map((player) => ({
+        number: player.number,
+        name: player.name,
+        stats: safeLabels.reduce((acc, label, index) => {
+          acc[label] = player.columnValues?.[index] ?? EMPTY_VALUE_PLACEHOLDER;
+          return acc;
+        }, {}),
+      })),
+    })),
+  };
 };
 
 function round(value) {
@@ -493,9 +609,39 @@ export default function VolleyPdfParser() {
   const [loading, setLoading] = useState(false);
   const [setColumnCount, setSetColumnCount] = useState(DEFAULT_SET_COLUMNS);
   const [isUploadVisible, setIsUploadVisible] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [submitSuccess, setSubmitSuccess] = useState(null);
+  const [matchDate, setMatchDate] = useState("");
+  const [matchTime, setMatchTime] = useState("");
+  const [toast, setToast] = useState(null);
+  const toastTimeoutRef = useRef(null);
+  const autoSubmitInFlight = useRef(false);
 
   const columnLabels = buildTableColumnLabels(setColumnCount);
   const groupedPlayers = groupPlayersByTeam(players);
+
+  const showToast = (message, tone = "success") => {
+    if (!message) return;
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setToast({ message, tone });
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null);
+    }, 5000);
+  };
+
+  useEffect(() => () => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+  }, []);
+
+  const dispatchMatchSavedEvent = (matchId) => {
+    if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") return;
+    window.dispatchEvent(new CustomEvent("matchreport:saved", { detail: { matchId } }));
+  };
 
   // -------------------------------
   // HANDLE FILE UPLOAD
@@ -515,6 +661,8 @@ export default function VolleyPdfParser() {
     try {
       setLoading(true);
       setError(null);
+      setSubmitError(null);
+      setSubmitSuccess(null);
       setPlayers([]);
 
       const buffer = await pdfFile.arrayBuffer();
@@ -542,6 +690,11 @@ export default function VolleyPdfParser() {
       }
 
       const lines = groupLines(items);
+      const { date: detectedDate, time: detectedTime } = detectMatchMetadata(lines);
+      const nextMatchDate = detectedDate || "";
+      const nextMatchTime = detectedTime || "";
+      setMatchDate(nextMatchDate);
+      setMatchTime(nextMatchTime);
       const { players: parsedPlayers, lastPlayerLineIndex } = extractPlayers(lines);
       const relevantLines =
         typeof lastPlayerLineIndex === "number" && lastPlayerLineIndex >= 0
@@ -583,6 +736,71 @@ export default function VolleyPdfParser() {
     }
   }
 
+  async function sendTableDataToBackend(options = {}) {
+    const {
+      playersInput = players,
+      columnLabelsInput = columnLabels,
+      setColumnsInput = setColumnCount,
+      matchDateInput = matchDate,
+      matchTimeInput = matchTime,
+      trigger = "manual",
+    } = options;
+
+    if (!Array.isArray(playersInput) || !playersInput.length) {
+      if (trigger === "manual") {
+        setSubmitError("Nenhum dado disponível para envio.");
+        setSubmitSuccess(null);
+      }
+      return null;
+    }
+
+    if (trigger === "auto" && autoSubmitInFlight.current) {
+      return null;
+    }
+
+    if (trigger === "auto") {
+      autoSubmitInFlight.current = true;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+    setSubmitSuccess(null);
+
+    const payload = buildMatchReportPayload({
+      playersData: playersInput,
+      columnLabels: columnLabelsInput,
+      setColumns: setColumnsInput,
+      matchDateValue: matchDateInput,
+      matchTimeValue: matchTimeInput,
+    });
+
+    try {
+      const response = await api.stats.submitMatchReport(payload);
+      const matchId = response?.matchId ?? null;
+      const successMessage = matchId
+        ? `Match Report loaded.`
+        : "Match Report saved.";
+      setSubmitSuccess(successMessage);
+      showToast(matchId ? `Match salvo (#${matchId})` : "Match salvo.");
+      dispatchMatchSavedEvent(matchId);
+      return matchId;
+    } catch (submissionError) {
+      console.error(submissionError);
+      const baseMessage = submissionError?.message || "Falha ao enviar os dados.";
+      const validationDetails = formatValidationErrors(submissionError?.errors);
+      const combinedMessage = validationDetails ? `${baseMessage} (${validationDetails})` : baseMessage;
+      setSubmitError(combinedMessage);
+      setSubmitSuccess(null);
+      showToast(baseMessage, "error");
+      return null;
+    } finally {
+      setIsSubmitting(false);
+      if (trigger === "auto") {
+        autoSubmitInFlight.current = false;
+      }
+    }
+  }
+
   function handleShowUploadInput() {
     setIsUploadVisible(true);
   }
@@ -597,8 +815,7 @@ export default function VolleyPdfParser() {
         style={{
           display: "flex",
           justifyContent: "flex-end",
-          alignItems: "center",
-          marginBottom: 12,
+          alignItems: "center"
         }}
       >
         {isUploadVisible ? (
@@ -672,144 +889,92 @@ export default function VolleyPdfParser() {
 
       {loading && <p>Reading File...</p>}
       {error && <p style={{ color: "red" }}>{error}</p>}
+      {groupedPlayers.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 13, color: "#475569" }}>
+              Date
+              <input
+                type="date"
+                value={matchDate}
+                onChange={(event) => setMatchDate(event.target.value)}
+                style={{
+                  marginTop: 4,
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #cbd5f5",
+                  minWidth: 180,
+                }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", fontSize: 13, color: "#475569" }}>
+              Time
+              <input
+                type="time"
+                value={matchTime}
+                onChange={(event) => setMatchTime(event.target.value)}
+                style={{
+                  marginTop: 4,
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #cbd5f5",
+                  minWidth: 140,
+                }}
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={() => sendTableDataToBackend()}
+            disabled={isSubmitting}
+            style={{
+              padding: "8px 16px",
+              borderRadius: 999,
+              border: "none",
+              background: isSubmitting ? "#94a3b8" : "#0f172a",
+              color: "#f8fafc",
+              cursor: isSubmitting ? "not-allowed" : "pointer",
+              fontWeight: 600,
+            }}
+          >
+            {isSubmitting ? "Uploading..." : "Save Match Report"}
+          </button>
+          {submitError && <span style={{ color: "#dc2626" }}>{submitError}</span>}
+          {submitSuccess && <span style={{ color: "#16a34a" }}>{submitSuccess}</span>}
+        </div>
+      )}
 
-      {groupedPlayers.length === 0 ? (
-        <p style={{ color: "#475569" }}></p>
-      ) : (
-        groupedPlayers.map(({ team, players: teamPlayers }) => {
-          const upperHeaderCells = [
-            { key: "team", label: team, span: 2 },
-            { key: "set", label: "Set", span: setColumnCount },
-            { key: "vote", label: "Vote", span: 1 },
-            { key: "points", label: "Points", span: 3 },
-            { key: "serve", label: "Serve", span: 3 },
-            { key: "reception", label: "Reception", span: 4 },
-            { key: "attack", label: "Attack", span: 5 },
-            { key: "bkpts", label: "BK Pts", span: 1 },
-          ];
-          const dividerSet = buildGroupDividerSet(upperHeaderCells);
+      {groupedPlayers.length === 0 ? null : (
+        <MatchReportTable
+          teams={groupedPlayers}
+          columnLabels={columnLabels}
+          setColumnCount={setColumnCount}
+        />
+      )}
 
-          return (
-            <section key={team} style={{ marginBottom: 32 }}>
-              <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-                <h4 style={{ margin: 0 }}>{team}</h4>
-                <span style={{ fontSize: 13, color: "#475569" }}>{teamPlayers.length} atletas</span>
-              </header>
-              <div style={{ overflowX: "auto", marginTop: 12 }}>
-                <table
-                  style={{
-                    width: "100%",
-                    borderCollapse: "collapse",
-                    fontSize: 14,
-                    minWidth: 480,
-                  }}
-                >
-                  <thead>
-                    <tr style={{ background: "#0f172a", color: "#e2e8f0" }}>
-                      {upperHeaderCells.map(({ key, label, span }, index) => (
-                        <th
-                          key={`${team}-${key}`}
-                          colSpan={span}
-                          style={{
-                            textAlign: "left",
-                            padding: "8px 10px",
-                            borderLeft: index === 0 ? "none" : `1px solid ${HEADER_BORDER_COLOR}`,
-                          }}
-                        >
-                          {label}
-                        </th>
-                      ))}
-                    </tr>
-                    <tr style={{ background: "#1e293b", color: "#e2e8f0" }}>
-                      <th
-                        style={{
-                          textAlign: "left",
-                          padding: "8px 10px",
-                          width: 60,
-                          position: "sticky",
-                          left: 0,
-                          background: "#1e293b",
-                          zIndex: 2,
-                        }}
-                      >
-                        Nº
-                      </th>
-                      <th
-                        style={{
-                          textAlign: "left",
-                          padding: "8px 10px",
-                          borderLeft: dividerSet.has(1) ? `1px solid ${HEADER_BORDER_COLOR}` : "none",
-                        }}
-                      >
-                        Nome
-                      </th>
-                      {columnLabels.map((label, index) => (
-                        <th
-                          key={`${team}-header-${index}`}
-                          style={{
-                            textAlign: "left",
-                            padding: "8px 10px",
-                            borderLeft: dividerSet.has(index + 2)
-                              ? `1px solid ${HEADER_BORDER_COLOR}`
-                              : "none",
-                          }}
-                        >
-                          {label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                <tbody>
-                  {teamPlayers.map((player) => (
-                    <tr
-                      key={`${team}-${player.number}-${player.name}`}
-                      title={player.lineText}
-                    >
-                      <td
-                        style={{
-                          padding: "8px 10px",
-                          fontWeight: 600,
-                          position: "sticky",
-                          left: 0,
-                          background: "#1e293b",
-                          zIndex: 1,
-                        }}
-                      >
-                        {player.number}
-                      </td>
-                      <td
-                        style={{
-                          padding: "8px 10px",
-                          borderLeft: dividerSet.has(1) ? `1px solid ${BODY_BORDER_COLOR}` : "none",
-                        }}
-                      >
-                        {player.name}
-                      </td>
-                      {player.columnValues.map((value, index) => (
-                        <td
-                          key={`${player.number}-${index}`}
-                          style={{
-                            padding: "8px 10px",
-                            borderLeft: dividerSet.has(index + 2)
-                              ? `1px solid ${BODY_BORDER_COLOR}`
-                              : "none",
-                          }}
-                        >
-                          <div style={{ fontFamily: "monospace", fontSize: 13 }}>
-                            {value}
-                          </div>
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        );
-        })
+      {toast && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            bottom: 24,
+            right: 24,
+            background: toast.tone === "error" ? "#dc2626" : "#0f172a",
+            color: "#f8fafc",
+            padding: "12px 18px",
+            borderRadius: 12,
+            boxShadow: "0 10px 25px rgba(15, 23, 42, 0.35)",
+            fontWeight: 600,
+            maxWidth: 320,
+          }}
+        >
+          {toast.message}
+        </div>
       )}
 
     </div>
   );
 }
+
+export { buildMatchReportPayload };

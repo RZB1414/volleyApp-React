@@ -3,6 +3,7 @@ import { useAuth } from '@/hooks/useAuth.js'
 
 const authedLinks = [
   { to: '/', label: 'Dashboard' },
+  { to: '/matches', label: 'Relatórios' },
   { to: '/videos', label: 'Videos' },
   { to: '/profile', label: 'Profile' },
 ]
@@ -32,7 +33,7 @@ const NavigationBar = () => {
         <Link to="/" className="flex flex-col">
           <span className="text-lg font-bold tracking-tight text-white">Volley Plus Console</span>
         </Link>
-        <nav className="flex flex-1 items-center justify-end gap-2">
+        <nav className="flex flex-1 items-center justify-end">
           {(isAuthenticated ? authedLinks : guestLinks).map((link) => (
             <NavLink key={link.to} to={link.to} className={buildClass} end={link.to === '/'}>
               {link.label}

@@ -6,6 +6,7 @@ import PageSection from '@/components/PageSection.js'
 import { useAuth } from '@/hooks/useAuth.js'
 import { mergeFieldErrors, validateRegister } from '@/utils/formValidators.js'
 import { countries } from '@/data/countries.js'
+import { sanitizePlayerNumber, serializeTeamCountry } from '@/utils/profileUpdate.js'
 
 const RegisterPage = () => {
   const navigate = useNavigate()
@@ -18,6 +19,7 @@ const RegisterPage = () => {
     actualTeam: '',
     country: '',
     yearsAsAProfessional: '',
+    playerNumber: '',
   })
   const [errors, setErrors] = useState({})
   const [submitting, setSubmitting] = useState(false)
@@ -60,6 +62,15 @@ const RegisterPage = () => {
 
   const handleChange = (event) => {
     const { name, value } = event.target
+    if (name === 'playerNumber') {
+      setValues((prev) => ({ ...prev, playerNumber: sanitizePlayerNumber(value) }))
+      return
+    }
+    if (name === 'yearsAsAProfessional') {
+      const digitsOnly = value.replace(/[^0-9]/g, '').slice(0, 4)
+      setValues((prev) => ({ ...prev, yearsAsAProfessional: digitsOnly }))
+      return
+    }
     setValues((prev) => ({ ...prev, [name]: value }))
   }
 
@@ -72,11 +83,19 @@ const RegisterPage = () => {
     setSubmitting(true)
     setApiMessage(null)
     try {
+          const normalizedTeam = values.actualTeam?.trim() || undefined
+          const serializedCountry = serializeTeamCountry(selectedCountry)
+          const currentTeamCountryCode = serializedCountry?.code || undefined
+      const sanitizedNumber = sanitizePlayerNumber(values.playerNumber)
       await register({
         ...values,
         age: values.age ? Number(values.age) : undefined,
-        actualTeam: values.actualTeam?.trim() || undefined,
-        country: values.country || undefined,
+        actualTeam: normalizedTeam,
+        currentTeam: normalizedTeam,
+        country: currentTeamCountryCode,
+        currentTeamCountryCode,
+        currentTeamCountry: serializedCountry || undefined,
+        playerNumber: sanitizedNumber || undefined,
         yearsAsAProfessional: values.yearsAsAProfessional !== '' ? Number(values.yearsAsAProfessional) : undefined,
       })
       appendLog('success', 'Registration completed and session started.')
@@ -110,18 +129,19 @@ const RegisterPage = () => {
         <FormField label="Age" error={errors.age} htmlFor="age">
           <Input id="age" name="age" type="number" min="10" max="100" placeholder="25" value={values.age} onChange={handleChange} error={errors.age} />
         </FormField>
-        <FormField label="Years as professional" error={errors.yearsAsAProfessional} htmlFor="yearsAsAProfessional">
+        <FormField label="Ano que comecei a jogar" error={errors.yearsAsAProfessional} htmlFor="yearsAsAProfessional">
           <Input
             id="yearsAsAProfessional"
             name="yearsAsAProfessional"
             type="number"
-            min="0"
-            max="80"
-            placeholder="5"
+            min="1950"
+            max={new Date().getFullYear()}
+            placeholder="Ex.: 2010"
             value={values.yearsAsAProfessional}
             onChange={handleChange}
             error={errors.yearsAsAProfessional}
           />
+          <p className="mt-1 text-xs text-slate-500">Informe o ano em que começou no vôlei profissional.</p>
         </FormField>
         <div className="md:col-span-2">
           <FormField label="Current team" error={errors.actualTeam} htmlFor="actualTeam">
@@ -141,6 +161,19 @@ const RegisterPage = () => {
             </div>
           </FormField>
         </div>
+        <FormField label="Jersey number" error={errors.playerNumber} htmlFor="playerNumber">
+          <Input
+            id="playerNumber"
+            name="playerNumber"
+            placeholder="Ex.: 12"
+            maxLength={3}
+            inputMode="numeric"
+            value={values.playerNumber}
+            onChange={handleChange}
+            error={errors.playerNumber}
+          />
+          <p className="mt-1 text-xs text-slate-500">Deixe em branco para registrar sem número de camisa.</p>
+        </FormField>
         <div className="md:col-span-2">
           <label className="flex flex-col gap-2 text-sm font-semibold text-slate-200">
             Team country

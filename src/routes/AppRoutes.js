@@ -9,6 +9,8 @@ import PendingUploads from '@/pages/PendingUploads.js'
 import Register from '@/pages/Register.js'
 import UploadManager from '@/pages/UploadManager.js'
 import Videos from '@/pages/Videos.js'
+import SavedMatches from '@/pages/SavedMatches.js'
+import MatchReportDetail from '@/pages/MatchReportDetail.js'
 
 const AppRoutes = () => (
   <Routes>
@@ -21,6 +23,8 @@ const AppRoutes = () => (
       <Route path="/download" element={<DownloadTokens />} />
       <Route path="/profile" element={<Profile />} />
       <Route path="/videos" element={<Videos />} />
+      <Route path="/matches" element={<SavedMatches />} />
+      <Route path="/matches/:matchId" element={<MatchReportDetail />} />
     </Route>
     <Route path="*" element={<NotFound />} />
   </Routes>

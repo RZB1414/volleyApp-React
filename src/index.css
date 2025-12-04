@@ -37,3 +37,15 @@ body {
     @apply rounded-lg border border-slate-600 px-4 py-2 font-semibold text-slate-100 transition hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-300;
   }
 }
+
+.chart-focus-guard :is(
+  .recharts-responsive-container,
+  .recharts-wrapper,
+  .recharts-surface,
+  .recharts-tooltip-wrapper,
+  .recharts-default-tooltip
+) {
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important;
+}

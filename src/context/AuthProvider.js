@@ -1,12 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ApiError, api, configureAuthObserver } from '@/services/api.js'
 import { countries } from '@/data/countries.js'
+import { normalizeTeamHistoryFromApi } from '@/utils/teamHistory.js'
 import { AuthContext } from './AuthContext'
 
 const storageKeys = {
   token: 'volleyplus_access_token',
   user: 'volleyplus_user',
   headers: 'volleyplus_headers',
+}
+
+const userFieldDefaults = {
+  id: null,
+  name: null,
+  email: null,
+  age: null,
+  currentTeam: null,
+  country: null,
+  currentTeamCountry: null,
+  yearsAsAProfessional: null,
+  playerNumber: null,
+  createdAt: null,
+  updatedAt: null,
+  teamHistory: [],
 }
 
 const safeGet = (key, fallback = null) => {
@@ -40,28 +56,45 @@ const findCountryEntry = (value) => {
   ) ?? null
 }
 
+const normalizePlayerNumber = (value) => {
+  if (value === null || value === undefined) return null
+  const normalized = String(value).trim()
+  if (!normalized) return null
+  const digitsOnly = normalized.replace(/[^0-9]/g, '')
+  return digitsOnly.slice(0, 3) || null
+}
+
 const normalizeUserProfile = (user) => {
   if (!user) return null
-  const derivedTeam = user.actualTeam ?? user.currentTeam ?? null
-  const rawCountry = (() => {
-    if (typeof user.country === 'string' && user.country.trim()) return user.country.trim()
-    if (typeof user.currentTeamCountryCode === 'string' && user.currentTeamCountryCode.trim()) {
-      return user.currentTeamCountryCode.trim()
-    }
-    if (typeof user.currentTeamCountry === 'string' && user.currentTeamCountry.trim()) {
-      return user.currentTeamCountry.trim()
-    }
-    if (user.currentTeamCountry?.code) return user.currentTeamCountry.code
+  const hydrated = { ...userFieldDefaults, ...user }
+  const normalizedTeam = typeof hydrated.currentTeam === 'string' ? hydrated.currentTeam.trim() : null
+  const normalizedCountry = typeof hydrated.country === 'string' ? hydrated.country.trim() : null
+  const countrySource = (() => {
+    if (typeof hydrated.currentTeamCountry === 'string') return hydrated.currentTeamCountry
+    if (hydrated.currentTeamCountry?.code) return hydrated.currentTeamCountry.code
+    if (hydrated.currentTeamCountry?.name) return hydrated.currentTeamCountry.name
+    if (normalizedCountry) return normalizedCountry
     return null
   })()
-  const countryEntry = findCountryEntry(rawCountry ?? '')
+  const countryEntry = countrySource ? findCountryEntry(countrySource) : null
+  const normalizedCountryEntry = countryEntry ?? (countrySource ? { name: countrySource, code: countrySource, flag: null } : null)
+  const playerNumber = normalizePlayerNumber(hydrated.playerNumber)
+  const normalizedYears = (() => {
+    const years = hydrated.yearsAsAProfessional
+    if (years === null || years === undefined) return null
+    const numeric = typeof years === 'number' ? years : Number(years)
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null
+  })()
+  const teamHistory = normalizeTeamHistoryFromApi(hydrated.teamHistory)
+
   return {
-    ...user,
-    actualTeam: derivedTeam,
-    currentTeam: derivedTeam,
-    country: rawCountry ?? countryEntry?.code ?? null,
-    currentTeamCountryCode: countryEntry?.code ?? rawCountry ?? null,
-    currentTeamCountry: countryEntry ?? null,
+    ...hydrated,
+    currentTeam: normalizedTeam,
+    country: normalizedCountryEntry?.code ?? normalizedCountry ?? null,
+    currentTeamCountry: normalizedCountryEntry,
+    yearsAsAProfessional: normalizedYears,
+    playerNumber,
+    teamHistory,
   }
 }
 
@@ -166,19 +199,16 @@ export const AuthProvider = ({ children }) => {
     return persistSession(profile.user, accessToken)
   }, [accessToken, persistSession])
 
-  const updateUserProfile = useCallback((updater) => {
-    let nextUser = null
-    setUser((prev) => {
-      const base = prev ?? {}
-      const draft = typeof updater === 'function' ? updater(base) : { ...base, ...updater }
-      nextUser = normalizeUserProfile(draft)
-      return nextUser
-    })
-    if (nextUser) {
-      safeSet(storageKeys.user, nextUser)
-    }
-    return nextUser
-  }, [])
+  const updateUserProfile = useCallback(
+    (updater) => {
+      const baseUser = user ?? {}
+      const draft = typeof updater === 'function' ? updater(baseUser) : updater
+      if (!draft) return null
+      const tokenToPersist = accessToken ?? null
+      return persistSession(draft, tokenToPersist)
+    },
+    [accessToken, persistSession, user],
+  )
 
   const value = useMemo(
     () => ({
