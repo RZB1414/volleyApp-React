@@ -49,6 +49,11 @@ const resolveUserHeaders = (requireUserHeaders) => {
   }
 }
 
+const resolveCurrentUserId = () => {
+  const { user, headerOverrides } = authSnapshot()
+  return headerOverrides?.userId ?? user?.id ?? user?._id ?? user?.userId ?? null
+}
+
 const buildUrl = (path) => {
   if (!API_BASE_URL) {
     throw new Error('Missing VITE_API_BASE_URL. Set it in your .env file before making API calls.')
@@ -190,6 +195,7 @@ export const api = {
       request('/stats/match-report', {
         method: 'POST',
         body: payload,
+        requireUserHeaders: true,
       }),
     listMatchReports: ({ limit = 20, team, playerNumber } = {}) => {
       const params = new URLSearchParams()
@@ -197,15 +203,17 @@ export const api = {
       const filterParams = resolveUserPlayerFilters({ team, playerNumber })
       if (filterParams.team) params.set('team', filterParams.team)
       if (filterParams.playerNumber) params.set('playerNumber', filterParams.playerNumber)
+      const ownerId = resolveCurrentUserId()
+      if (ownerId) params.set('ownerId', ownerId)
       const query = params.toString()
       const path = query ? `/stats/match-report?${query}` : '/stats/match-report'
-      return request(path)
+      return request(path, { requireUserHeaders: true })
     },
     getMatchReport: (matchId) => {
       if (!matchId) {
         throw new Error('matchId is required')
       }
-      return request(`/stats/match-report/${encodeURIComponent(matchId)}`)
+      return request(`/stats/match-report/${encodeURIComponent(matchId)}`, { requireUserHeaders: true })
     },
   },
 }

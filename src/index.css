@@ -43,7 +43,9 @@ body {
   .recharts-wrapper,
   .recharts-surface,
   .recharts-tooltip-wrapper,
-  .recharts-default-tooltip
+  .recharts-default-tooltip,
+  .chart-legend-entry,
+  .chart-legend-entry *
 ) {
   outline: none !important;
   border: none !important;

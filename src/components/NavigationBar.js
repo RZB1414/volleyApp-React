@@ -3,7 +3,7 @@ import { useAuth } from '@/hooks/useAuth.js'
 
 const authedLinks = [
   { to: '/', label: 'Dashboard' },
-  { to: '/matches', label: 'Relatórios' },
+  { to: '/matches', label: 'Reports' },
   { to: '/videos', label: 'Videos' },
   { to: '/profile', label: 'Profile' },
 ]

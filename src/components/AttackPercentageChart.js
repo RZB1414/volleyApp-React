@@ -15,8 +15,20 @@ import { useAuth } from '@/hooks/useAuth.js'
 const DATE_FORMATTER = new Intl.DateTimeFormat('en-US', { day: '2-digit', month: 'short' })
 const DEFAULT_MATCH_LIMIT = 12
 const LINE_COLORS = ['#2dd4bf', '#f97316', '#38bdf8', '#f472b6', '#a78bfa', '#facc15', '#4ade80']
-const STAT_PRIORITY = ['Pts%', 'Attack', 'Ataque', 'Exc%', 'Tot', 'Vote']
+const STAT_PRIORITY = ['Pts%', 'Attack', 'Ataque', 'Exc%', 'Tot', 'Vote', 'Total Err Points']
 const EXCLUDED_STAT_KEYS = new Set(['vote', '1', '2', '3', '4', '5'])
+const TOTAL_ERROR_METRIC = 'Total Err Points'
+const TOTAL_ERROR_COMPONENTS = ['Attacks Err', 'Attacks Blocked', 'Receptions Err', 'Serves Err']
+const PRESET_OPTIONS = [
+  {
+    label: 'Total Err Points + Points Tot + Attacks Pts%',
+    metrics: [TOTAL_ERROR_METRIC, 'Points Tot', 'Attacks Pts%'],
+  },
+  {
+    label: 'Serves Tot + Serves Pts + Serves Err',
+    metrics: ['Serves Tot', 'Serves Pts', 'Serves Err'],
+  },
+]
 
 const normalizeName = (value) => {
   if (!value || typeof value !== 'string') return ''
@@ -67,6 +79,9 @@ const parseStatValue = (value) => {
   const numeric = Number(normalized)
   return Number.isNaN(numeric) ? 0 : numeric
 }
+
+const computeTotalErrorPoints = (stats = {}) =>
+  TOTAL_ERROR_COMPONENTS.reduce((total, key) => total + parseStatValue(stats?.[key]), 0)
 
 const buildPlayerHistory = (reports, playerFilter) => {
   if (!playerFilter?.number) {
@@ -142,6 +157,48 @@ const sortStatKeys = (keys) => {
   })
 }
 
+const ChartTooltipContent = ({
+  active,
+  payload,
+  label,
+  tooltipEnabled,
+  formatValue,
+  onStatsChange,
+  fallbackStats,
+}) => {
+  const shouldRender = tooltipEnabled && Boolean(active && payload?.length)
+
+  useEffect(() => {
+    if (typeof onStatsChange !== 'function') return
+    if (shouldRender) {
+      const hoveredStats = payload?.[0]?.payload?.__stats || null
+      onStatsChange(hoveredStats || null)
+      return
+    }
+    onStatsChange(fallbackStats || null)
+  }, [fallbackStats, onStatsChange, payload, shouldRender])
+
+  if (!shouldRender) {
+    return null
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100">
+      <p className="font-semibold">{label}</p>
+      <ul className="mt-1 space-y-1">
+        {payload.map((entry) => (
+          <li key={entry.dataKey} className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />
+            <span>
+              {entry.dataKey}: {formatValue(Number(entry.value).toFixed(entry.dataKey.includes('%') ? 1 : 0), entry.dataKey)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateChange }) => {
   const { user } = useAuth()
   const [reports, setReports] = useState([])
@@ -149,9 +206,11 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
   const [statMenuOpen, setStatMenuOpen] = useState(false)
   const statMenuRef = useRef(null)
   const chartContainerRef = useRef(null)
+  const legendStatsRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [tooltipEnabled, setTooltipEnabled] = useState(true)
+  const [legendStats, setLegendStats] = useState(null)
 
   const fetchReports = useCallback(async () => {
     try {
@@ -194,6 +253,17 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
     fetchReports()
   }, [fetchReports])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+    const handleMatchSaved = () => {
+      fetchReports()
+    }
+    window.addEventListener('matchreport:saved', handleMatchSaved)
+    return () => {
+      window.removeEventListener('matchreport:saved', handleMatchSaved)
+    }
+  }, [fetchReports])
+
   const playerFilter = useMemo(() => resolvePlayerFilter(user), [user])
 
   const playerHistory = useMemo(
@@ -203,7 +273,9 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
 
   const statOptions = useMemo(() => {
     const filtered = playerHistory.statKeys.filter((label) => !EXCLUDED_STAT_KEYS.has((label || '').toLowerCase()))
-    return sortStatKeys(filtered)
+    const hasErrorComponents = playerHistory.statKeys.some((label) => TOTAL_ERROR_COMPONENTS.includes(label))
+    const withDerived = hasErrorComponents ? [...filtered, TOTAL_ERROR_METRIC] : filtered
+    return sortStatKeys(withDerived)
   }, [playerHistory.statKeys])
 
   useEffect(() => {
@@ -211,9 +283,13 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
       setSelectedStats([])
       return
     }
+    const firstAvailablePreset = PRESET_OPTIONS.find((preset) =>
+      preset.metrics.every((metric) => statOptions.includes(metric)),
+    )
     setSelectedStats((prev) => {
       const next = prev.filter((stat) => statOptions.includes(stat))
       if (next.length) return next
+      if (firstAvailablePreset) return firstAvailablePreset.metrics
       return [statOptions[0]]
     })
   }, [statOptions])
@@ -230,16 +306,45 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
     [playerHistory.rows, useDateLabel],
   )
 
+  const latestRowStats = useMemo(() => (chartRows.length ? chartRows[chartRows.length - 1].stats : null), [chartRows])
+
+  const updateLegendStats = useCallback((stats) => {
+    if (legendStatsRef.current !== stats) {
+      legendStatsRef.current = stats
+      setLegendStats(stats)
+    }
+  }, [])
+
+  useEffect(() => {
+    updateLegendStats(latestRowStats || null)
+  }, [latestRowStats, updateLegendStats])
+
   const chartData = useMemo(() => {
     if (!selectedStats.length) return []
     return chartRows.map((row) => {
       const entry = { matchId: row.matchId, label: row.label }
       selectedStats.forEach((statKey) => {
-        entry[statKey] = parseStatValue(row.stats?.[statKey])
+        entry[statKey] = statKey === TOTAL_ERROR_METRIC
+          ? computeTotalErrorPoints(row.stats)
+          : parseStatValue(row.stats?.[statKey])
       })
+      entry.__stats = row.stats
       return entry
     })
   }, [chartRows, selectedStats])
+
+  const totalErrorComponentColors = useMemo(() => {
+    const baseOffset = selectedStats.length % LINE_COLORS.length
+    return TOTAL_ERROR_COMPONENTS.reduce((acc, component, idx) => {
+      const selectedIndex = selectedStats.indexOf(component)
+      if (selectedIndex !== -1) {
+        acc[component] = LINE_COLORS[selectedIndex % LINE_COLORS.length]
+      } else {
+        acc[component] = LINE_COLORS[(baseOffset + idx) % LINE_COLORS.length]
+      }
+      return acc
+    }, {})
+  }, [selectedStats])
 
   const missingPlayerNumber = !playerFilter.number
   const displayName = playerHistory.playerName || user?.name || 'seu atleta'
@@ -264,6 +369,13 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
       return [...prev, statKey]
     })
   }
+
+  const applyPresetMetrics = useCallback((metrics) => {
+    if (!statOptions.length || !metrics?.length) return
+    const availablePreset = metrics.filter((metric) => statOptions.includes(metric))
+    if (!availablePreset.length) return
+    setSelectedStats(availablePreset)
+  }, [statOptions])
 
   const handleApplySelection = () => {
     if (!selectedStats.length && statOptions.length) {
@@ -304,29 +416,6 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
     setTooltipEnabled(true)
   }
 
-  const handleChartTouchMove = (event) => {
-    event.preventDefault()
-  }
-
-  const renderTooltipContent = useCallback(({ active, payload, label }) => {
-    if (!tooltipEnabled || !active || !payload?.length) return null
-    return (
-      <div className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100">
-        <p className="font-semibold">{label}</p>
-        <ul className="mt-1 space-y-1">
-          {payload.map((entry) => (
-            <li key={entry.dataKey} className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />
-              <span>
-                {entry.dataKey}: {formatValue(Number(entry.value).toFixed(entry.dataKey.includes('%') ? 1 : 0), entry.dataKey)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    )
-  }, [formatValue, tooltipEnabled])
-
   useEffect(() => {
     if (typeof onDataStateChange !== 'function') return
     const hasData = !loading && !isEmptyState
@@ -349,11 +438,30 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
               onClick={() => setStatMenuOpen((prev) => !prev)}
               disabled={loading || !statOptions.length}
             >
-              {selectedStats.length ? `${selectedStats.length} métricas selecionadas` : 'Selecione as métricas'}
+              {selectedStats.length ? `${selectedStats.length} selected metrics` : 'Select metrics'}
             </button>
             {statMenuOpen && (
               <div className="absolute right-[-82px] z-20 mt-2 w-44 rounded-lg border border-slate-700 bg-slate-900/95 p-3 shadow-xl">
-                <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">Métricas disponíveis</p>
+                <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">Available Metrics</p>
+                <div className="mb-3 space-y-2">
+                  {PRESET_OPTIONS.map((preset) => {
+                    const disabled = !preset.metrics.every((metric) => statOptions.includes(metric))
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        className="w-full rounded border border-teal-500/40 bg-teal-500/10 px-2 py-1 text-xs font-semibold text-teal-300 hover:bg-teal-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={() => {
+                          applyPresetMetrics(preset.metrics)
+                          setStatMenuOpen(false)
+                        }}
+                        disabled={disabled}
+                      >
+                        {preset.label}
+                      </button>
+                    )
+                  })}
+                </div>
                 <div className="flex max-h-60 flex-col gap-1 overflow-y-auto">
                   {statOptions.map((label) => {
                     const checked = selectedStats.includes(label)
@@ -386,7 +494,7 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
             className="btn-secondary"
             disabled={loading}
           >
-            {loading ? 'Atualizando...' : 'Recarregar'}
+            {loading ? 'Reloading...' : 'Reload'}
           </button>
         </div>
       </header>
@@ -407,15 +515,18 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
         <p className="text-sm text-slate-400">Nenhum relatório com estatísticas disponíveis para {displayName}.</p>
       ) : (
         <div
-          className="chart-focus-guard h-80 w-full min-w-0 select-none"
+          className="chart-focus-guard h-80 w-full min-w-0 select-none -mx-4 sm:-mx-8"
           style={{ touchAction: 'none', outline: 'none' }}
           ref={chartContainerRef}
           onPointerDown={handleChartPointerDown}
           onPointerEnter={handleChartPointerDown}
-          onTouchMove={handleChartTouchMove}
         >
           <ResponsiveContainer minWidth={100} minHeight={100}>
-            <LineChart data={chartData} margin={{ top: 10, right: 24, left: 0, bottom: 0 }}>
+            <LineChart
+              data={chartData}
+              margin={{ top: 10, right: 8, left: -18, bottom: 0 }}
+              onMouseLeave={() => updateLegendStats(latestRowStats || null)}
+            >
               <CartesianGrid strokeDasharray="4 4" stroke="#1e293b" />
               <XAxis dataKey="label" stroke="#94a3b8" tick={{ fontSize: 12 }} />
               <YAxis
@@ -426,7 +537,15 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
               />
               <Tooltip
                 trigger="hover"
-                content={renderTooltipContent}
+                content={(tooltipProps) => (
+                  <ChartTooltipContent
+                    {...tooltipProps}
+                    tooltipEnabled={tooltipEnabled}
+                    formatValue={formatValue}
+                    onStatsChange={updateLegendStats}
+                    fallbackStats={latestRowStats || null}
+                  />
+                )}
                 wrapperStyle={{ outline: 'none', border: 'none', boxShadow: 'none', background: 'transparent' }}
               />
               {selectedStats.map((statKey, index) => {
@@ -446,14 +565,37 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
               })}
             </LineChart>
           </ResponsiveContainer>
-          {selectedStats.length > 1 && (
-            <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-400">
-              {selectedStats.map((statKey, index) => (
-                <div key={`${statKey}-legend`} className="flex items-center gap-2">
-                  <span className="h-2 w-6 rounded-full" style={{ backgroundColor: LINE_COLORS[index % LINE_COLORS.length] }} />
-                  <span>{statKey}</span>
-                </div>
-              ))}
+          {(selectedStats.length > 1 || selectedStats.includes(TOTAL_ERROR_METRIC)) && (
+            <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-400 pl-4 sm:pl-6">
+              {selectedStats.map((statKey, index) => {
+                const statsSource = legendStats || latestRowStats
+                const legendValue = statKey === TOTAL_ERROR_METRIC
+                  ? computeTotalErrorPoints(statsSource || {})
+                  : parseStatValue(statsSource?.[statKey])
+                return (
+                  <div key={`${statKey}-legend`} className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-6 rounded-full" style={{ backgroundColor: LINE_COLORS[index % LINE_COLORS.length] }} />
+                    <span>{statKey}: {formatValue(legendValue, statKey)}</span>
+                  </div>
+                  {statKey === TOTAL_ERROR_METRIC && (
+                    <ul className="ml-4 space-y-1 text-[11px] text-slate-400">
+                      {TOTAL_ERROR_COMPONENTS.map((component) => (
+                        <li key={`${statKey}-${component}`} className="flex items-center gap-2">
+                          <span
+                            className="h-2 w-4 rounded-full"
+                            style={{ backgroundColor: totalErrorComponentColors[component] }}
+                          />
+                          <span>
+                            {component}: {formatValue(parseStatValue((legendStats || latestRowStats)?.[component]), component)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

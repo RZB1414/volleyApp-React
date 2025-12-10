@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import PageSection from '@/components/PageSection.js'
-import { api } from '@/services/api.js'
+import { ApiError, api } from '@/services/api.js'
 import { formatBytes, uploadPartsSequentially } from '@/services/multipartHelper.js'
 import { useAuth } from '@/hooks/useAuth.js'
 import { recordCompletedUpload } from '@/utils/completedUploadsStorage.js'
@@ -93,7 +93,11 @@ const UploadManager = () => {
       setSession(normalizedSession)
       await uploadChunks(normalizedSession)
     } catch (err) {
-      setError(err.message)
+      if (err instanceof ApiError && err.status === 409) {
+        setError('You have already uploaded this PDF. Use another file or remove the previous one before trying again.')
+      } else {
+        setError(err.message)
+      }
       setStatus('error')      
     }
   }

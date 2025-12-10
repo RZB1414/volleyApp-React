@@ -1,7 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.min.js?url";
-import { api } from "../services/api";
+import { ApiError, api } from "../services/api";
 import MatchReportTable from "./MatchReportTable.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
@@ -617,6 +617,19 @@ export default function VolleyPdfParser() {
   const [toast, setToast] = useState(null);
   const toastTimeoutRef = useRef(null);
   const autoSubmitInFlight = useRef(false);
+  const lastSavedReportRef = useRef(null);
+
+  const resetViewToInitialState = useCallback(() => {
+    setPlayers([]);
+    setSetColumnCount(DEFAULT_SET_COLUMNS);
+    setMatchDate("");
+    setMatchTime("");
+    setIsUploadVisible(true);
+    setLoading(false);
+    setError(null);
+    setSubmitError(null);
+    setSubmitSuccess(null);
+  }, []);
 
   const columnLabels = buildTableColumnLabels(setColumnCount);
   const groupedPlayers = groupPlayersByTeam(players);
@@ -638,9 +651,9 @@ export default function VolleyPdfParser() {
     }
   }, []);
 
-  const dispatchMatchSavedEvent = (matchId) => {
+  const dispatchMatchSavedEvent = (matchId, ownerId) => {
     if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") return;
-    window.dispatchEvent(new CustomEvent("matchreport:saved", { detail: { matchId } }));
+    window.dispatchEvent(new CustomEvent("matchreport:saved", { detail: { matchId, ownerId } }));
   };
 
   // -------------------------------
@@ -777,18 +790,26 @@ export default function VolleyPdfParser() {
     try {
       const response = await api.stats.submitMatchReport(payload);
       const matchId = response?.matchId ?? null;
-      const successMessage = matchId
-        ? `Match Report loaded.`
-        : "Match Report saved.";
-      setSubmitSuccess(successMessage);
+      const ownerId = response?.ownerId ?? null;
+      lastSavedReportRef.current = { matchId, ownerId };
       showToast(matchId ? `Match salvo (#${matchId})` : "Match salvo.");
-      dispatchMatchSavedEvent(matchId);
+      dispatchMatchSavedEvent(matchId, ownerId);
+      resetViewToInitialState();
       return matchId;
     } catch (submissionError) {
       console.error(submissionError);
-      const baseMessage = submissionError?.message || "Falha ao enviar os dados.";
-      const validationDetails = formatValidationErrors(submissionError?.errors);
-      const combinedMessage = validationDetails ? `${baseMessage} (${validationDetails})` : baseMessage;
+      let baseMessage = submissionError?.message || "Falha ao enviar os dados.";
+      let combinedMessage = baseMessage;
+
+      if (submissionError instanceof ApiError && submissionError.status === 409) {
+        
+        baseMessage = 'Já existe um relatório para essa data com os mesmos times.';
+        combinedMessage = baseMessage;
+      } else {
+        const validationDetails = formatValidationErrors(submissionError?.errors);
+        combinedMessage = validationDetails ? `${baseMessage} (${validationDetails})` : baseMessage;
+      }
+
       setSubmitError(combinedMessage);
       setSubmitSuccess(null);
       showToast(baseMessage, "error");
@@ -803,6 +824,10 @@ export default function VolleyPdfParser() {
 
   function handleShowUploadInput() {
     setIsUploadVisible(true);
+  }
+
+  function handleCloseUploadInput() {
+    resetViewToInitialState();
   }
 
   // -------------------------------
@@ -851,39 +876,74 @@ export default function VolleyPdfParser() {
             </label>
           </>
         ) : (
-          <button
-            type="button"
-            onClick={handleShowUploadInput}
-            aria-label="Adicionar novo PDF"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 30,
-              height: 30,
-              borderRadius: "999px",
-              border: "1px solid #94a3b8",
-              background: "#f8fafc",
-              color: "#0f172a",
-              cursor: "pointer",
-            }}
-          >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button
+              type="button"
+              onClick={handleShowUploadInput}
+              aria-label="Adicionar novo PDF"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 30,
+                height: 30,
+                borderRadius: "999px",
+                border: "1px solid #94a3b8",
+                background: "#f8fafc",
+                color: "#0f172a",
+                cursor: "pointer",
+              }}
             >
-              <path
-                d="M12 5v14M5 12h14"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M12 5v14M5 12h14"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={handleCloseUploadInput}
+              aria-label="Fechar carregamento de PDF"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 30,
+                height: 30,
+                borderRadius: "999px",
+                border: "1px solid #94a3b8",
+                background: "#fee2e2",
+                color: "#b91c1c",
+                cursor: "pointer",
+              }}
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M18 6L6 18M6 6l12 12"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
         )}
       </div>
 
