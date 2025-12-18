@@ -19,6 +19,7 @@ const STAT_PRIORITY = ['Pts%', 'Attack', 'Ataque', 'Exc%', 'Tot', 'Vote', 'Total
 const EXCLUDED_STAT_KEYS = new Set(['vote', '1', '2', '3', '4', '5'])
 const TOTAL_ERROR_METRIC = 'Total Err Points'
 const TOTAL_ERROR_COMPONENTS = ['Attacks Err', 'Attacks Blocked', 'Receptions Err', 'Serves Err']
+const SERVES_ERR_PER_PTS_METRIC = 'Serves Err / Serves Pts'
 const PRESET_OPTIONS = [
   {
     label: 'Total Err Points + Points Tot + Attacks Pts%',
@@ -26,7 +27,7 @@ const PRESET_OPTIONS = [
   },
   {
     label: 'Serves Tot + Serves Pts + Serves Err',
-    metrics: ['Serves Tot', 'Serves Pts', 'Serves Err'],
+    metrics: ['Serves Tot', 'Serves Pts', 'Serves Err', SERVES_ERR_PER_PTS_METRIC],
   },
 ]
 
@@ -82,6 +83,19 @@ const parseStatValue = (value) => {
 
 const computeTotalErrorPoints = (stats = {}) =>
   TOTAL_ERROR_COMPONENTS.reduce((total, key) => total + parseStatValue(stats?.[key]), 0)
+
+const computeServesErrPerPts = (stats = {}) => {
+  const servesPts = parseStatValue(stats?.['Serves Pts'])
+  const servesErr = parseStatValue(stats?.['Serves Err'])
+  if (!servesPts) return servesErr || 0
+  return servesErr / servesPts
+}
+
+const resolveStatValue = (statKey, stats = {}) => {
+  if (statKey === TOTAL_ERROR_METRIC) return computeTotalErrorPoints(stats)
+  if (statKey === SERVES_ERR_PER_PTS_METRIC) return computeServesErrPerPts(stats)
+  return parseStatValue(stats?.[statKey])
+}
 
 const buildPlayerHistory = (reports, playerFilter) => {
   if (!playerFilter?.number) {
@@ -190,7 +204,7 @@ const ChartTooltipContent = ({
           <li key={entry.dataKey} className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} />
             <span>
-              {entry.dataKey}: {formatValue(Number(entry.value).toFixed(entry.dataKey.includes('%') ? 1 : 0), entry.dataKey)}
+              {entry.dataKey}: {formatValue(entry.value, entry.dataKey)}
             </span>
           </li>
         ))}
@@ -274,8 +288,11 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
   const statOptions = useMemo(() => {
     const filtered = playerHistory.statKeys.filter((label) => !EXCLUDED_STAT_KEYS.has((label || '').toLowerCase()))
     const hasErrorComponents = playerHistory.statKeys.some((label) => TOTAL_ERROR_COMPONENTS.includes(label))
-    const withDerived = hasErrorComponents ? [...filtered, TOTAL_ERROR_METRIC] : filtered
-    return sortStatKeys(withDerived)
+    const hasServesErrAndPts = playerHistory.statKeys.includes('Serves Err') && playerHistory.statKeys.includes('Serves Pts')
+    const derived = [...filtered]
+    if (hasErrorComponents) derived.push(TOTAL_ERROR_METRIC)
+    if (hasServesErrAndPts) derived.push(SERVES_ERR_PER_PTS_METRIC)
+    return sortStatKeys(derived)
   }, [playerHistory.statKeys])
 
   useEffect(() => {
@@ -324,14 +341,85 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
     return chartRows.map((row) => {
       const entry = { matchId: row.matchId, label: row.label }
       selectedStats.forEach((statKey) => {
-        entry[statKey] = statKey === TOTAL_ERROR_METRIC
-          ? computeTotalErrorPoints(row.stats)
-          : parseStatValue(row.stats?.[statKey])
+        entry[statKey] = resolveStatValue(statKey, row.stats)
       })
       entry.__stats = row.stats
       return entry
     })
   }, [chartRows, selectedStats])
+
+  const formatValue = useCallback((value, statKey) => {
+    if (value === null || value === undefined) return '0'
+    const numeric = typeof value === 'number' ? value : Number(value)
+    if (!Number.isFinite(numeric)) return '0'
+    if (statKey === SERVES_ERR_PER_PTS_METRIC) {
+      return numeric.toFixed(2)
+    }
+    if (statKey?.includes('%')) {
+      return `${numeric.toFixed(2)}%`
+    }
+    return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(2)
+  }, [])
+
+  const averageStats = useMemo(() => {
+    if (!selectedStats.length || !chartRows.length) return []
+
+    const totals = selectedStats.reduce((acc, key) => {
+      if (key !== SERVES_ERR_PER_PTS_METRIC) {
+        acc[key] = 0
+      }
+      return acc
+    }, {})
+
+    const includesServesRatio = selectedStats.includes(SERVES_ERR_PER_PTS_METRIC)
+    let totalServesErr = 0
+    let totalServesPts = 0
+
+    chartRows.forEach((row) => {
+      const stats = row.stats
+      selectedStats.forEach((statKey) => {
+        if (statKey === SERVES_ERR_PER_PTS_METRIC) return
+        const value = resolveStatValue(statKey, stats)
+        totals[statKey] = (totals[statKey] || 0) + value
+      })
+      if (includesServesRatio) {
+        totalServesErr += parseStatValue(stats?.['Serves Err'])
+        totalServesPts += parseStatValue(stats?.['Serves Pts'])
+      }
+    })
+
+    const gamesCount = chartRows.length
+    const averages = new Map()
+    Object.entries(totals).forEach(([key, sum]) => {
+      averages.set(key, gamesCount ? sum / gamesCount : 0)
+    })
+
+    return selectedStats.map((statKey) => {
+      if (statKey === SERVES_ERR_PER_PTS_METRIC) {
+        if (!includesServesRatio) return { key: statKey, value: 0 }
+
+        const servesErrAvg = averages.get('Serves Err')
+        const servesPtsAvg = averages.get('Serves Pts')
+
+        if (servesErrAvg !== undefined && servesPtsAvg !== undefined) {
+          const roundedErr = Number(formatValue(servesErrAvg, 'Serves Err'))
+          const roundedPts = Number(formatValue(servesPtsAvg, 'Serves Pts'))
+          if (roundedPts) {
+            return { key: statKey, value: roundedErr / roundedPts }
+          }
+          return { key: statKey, value: roundedErr || 0 }
+        }
+
+        const ratio = totalServesPts ? totalServesErr / totalServesPts : totalServesErr || 0
+        return { key: statKey, value: ratio }
+      }
+
+      return {
+        key: statKey,
+        value: averages.get(statKey) ?? 0,
+      }
+    })
+  }, [chartRows, formatValue, selectedStats])
 
   const totalErrorComponentColors = useMemo(() => {
     const baseOffset = selectedStats.length % LINE_COLORS.length
@@ -349,11 +437,6 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
   const missingPlayerNumber = !playerFilter.number
   const displayName = playerHistory.playerName || user?.name || 'seu atleta'
   const isEmptyState = !loading && (!chartData.length || !selectedStats.length)
-  const formatValue = useCallback((value, statKey) => {
-    if (value === null || value === undefined) return '0'
-    const numeric = typeof value === 'number' ? value : Number(value)
-    return statKey?.includes('%') ? `${numeric}%` : String(numeric)
-  }, [])
   const formatAxisValue = (value) => {
     const primaryStat = selectedStats[0] || ''
     return formatValue(value, primaryStat)
@@ -499,6 +582,36 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
         </div>
       </header>
 
+      {!loading && !isEmptyState && averageStats.length > 0 && (
+        <div className="flex justify-end px-4">
+          <div className="w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-200 sm:w-auto sm:min-w-[260px]">
+            <div className="flex items-baseline justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wide text-slate-500">Overall average</p>
+                <p className="text-base font-semibold text-slate-100">{chartRows.length} games</p>
+              </div>
+              <span className="text-xs text-slate-500">{selectedStats.length} metrics</span>
+            </div>
+            <ul className="mt-3 space-y-2">
+              {averageStats.map(({ key, value }) => {
+                const colorIndex = selectedStats.indexOf(key)
+                const color = LINE_COLORS[colorIndex !== -1 ? colorIndex % LINE_COLORS.length : 0]
+                const formattedValue = formatValue(value, key)
+                return (
+                  <li key={`average-${key}`} className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
+                      <span>{key}</span>
+                    </div>
+                    <span className="font-semibold text-slate-100">{formattedValue}</span>
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {error}
@@ -515,63 +628,64 @@ const AttackPercentageChart = ({ matchLimit = DEFAULT_MATCH_LIMIT, onDataStateCh
         <p className="text-sm text-slate-400">Nenhum relatório com estatísticas disponíveis para {displayName}.</p>
       ) : (
         <div
-          className="chart-focus-guard h-80 w-full min-w-0 select-none -mx-4 sm:-mx-8"
-          style={{ touchAction: 'none', outline: 'none' }}
+          className="chart-focus-guard w-full min-w-0 select-none -mx-4 sm:-mx-8 focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0"
+          style={{ touchAction: 'none', outline: 'none', boxShadow: 'none', border: 'none' }}
+          tabIndex={-1}
           ref={chartContainerRef}
           onPointerDown={handleChartPointerDown}
           onPointerEnter={handleChartPointerDown}
         >
-          <ResponsiveContainer minWidth={100} minHeight={100}>
-            <LineChart
-              data={chartData}
-              margin={{ top: 10, right: 8, left: -18, bottom: 0 }}
-              onMouseLeave={() => updateLegendStats(latestRowStats || null)}
-            >
-              <CartesianGrid strokeDasharray="4 4" stroke="#1e293b" />
-              <XAxis dataKey="label" stroke="#94a3b8" tick={{ fontSize: 12 }} />
-              <YAxis
-                stroke="#94a3b8"
-                tick={{ fontSize: 12 }}
-                domain={[0, 'auto']}
-                tickFormatter={formatAxisValue}
-              />
-              <Tooltip
-                trigger="hover"
-                content={(tooltipProps) => (
-                  <ChartTooltipContent
-                    {...tooltipProps}
-                    tooltipEnabled={tooltipEnabled}
-                    formatValue={formatValue}
-                    onStatsChange={updateLegendStats}
-                    fallbackStats={latestRowStats || null}
-                  />
-                )}
-                wrapperStyle={{ outline: 'none', border: 'none', boxShadow: 'none', background: 'transparent' }}
-              />
-              {selectedStats.map((statKey, index) => {
-                const stroke = LINE_COLORS[index % LINE_COLORS.length]
-                return (
-                  <Line
-                    key={statKey}
-                    type="monotone"
-                    dataKey={statKey}
-                    stroke={stroke}
-                    name={statKey}
-                    strokeWidth={2}
-                    dot={{ r: 3, strokeWidth: 2, stroke: '#0f172a', fill: stroke }}
-                    activeDot={{ r: 5 }}
-                  />
-                )
-              })}
-            </LineChart>
-          </ResponsiveContainer>
+          <div className="h-80 w-full">
+            <ResponsiveContainer minWidth={100} minHeight={100}>
+              <LineChart
+                data={chartData}
+                margin={{ top: 10, right: 8, left: -18, bottom: 0 }}
+                onMouseLeave={() => updateLegendStats(latestRowStats || null)}
+              >
+                <CartesianGrid strokeDasharray="4 4" stroke="#1e293b" />
+                <XAxis dataKey="label" stroke="#94a3b8" tick={{ fontSize: 12 }} />
+                <YAxis
+                  stroke="#94a3b8"
+                  tick={{ fontSize: 12 }}
+                  domain={[0, 'auto']}
+                  tickFormatter={formatAxisValue}
+                />
+                <Tooltip
+                  trigger="hover"
+                  content={(tooltipProps) => (
+                    <ChartTooltipContent
+                      {...tooltipProps}
+                      tooltipEnabled={tooltipEnabled}
+                      formatValue={formatValue}
+                      onStatsChange={updateLegendStats}
+                      fallbackStats={latestRowStats || null}
+                    />
+                  )}
+                  wrapperStyle={{ outline: 'none', border: 'none', boxShadow: 'none', background: 'transparent' }}
+                />
+                {selectedStats.map((statKey, index) => {
+                  const stroke = LINE_COLORS[index % LINE_COLORS.length]
+                  return (
+                    <Line
+                      key={statKey}
+                      type="monotone"
+                      dataKey={statKey}
+                      stroke={stroke}
+                      name={statKey}
+                      strokeWidth={2}
+                      dot={{ r: 3, strokeWidth: 2, stroke: '#0f172a', fill: stroke }}
+                      activeDot={{ r: 5, strokeWidth: 2, stroke: '#0f172a', fill: stroke }}
+                    />
+                  )
+                })}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
           {(selectedStats.length > 1 || selectedStats.includes(TOTAL_ERROR_METRIC)) && (
-            <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-400 pl-4 sm:pl-6">
+            <div className="mb-7 mt-3 flex flex-wrap gap-4 text-xs text-slate-400 pl-4 sm:pl-6">
               {selectedStats.map((statKey, index) => {
                 const statsSource = legendStats || latestRowStats
-                const legendValue = statKey === TOTAL_ERROR_METRIC
-                  ? computeTotalErrorPoints(statsSource || {})
-                  : parseStatValue(statsSource?.[statKey])
+                const legendValue = resolveStatValue(statKey, statsSource || {})
                 return (
                   <div key={`${statKey}-legend`} className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">

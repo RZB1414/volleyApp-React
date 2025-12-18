@@ -51,3 +51,28 @@ body {
   border: none !important;
   box-shadow: none !important;
 }
+
+/* Recharts can make SVG/wrappers focusable; keep focus reset scoped to charts only. */
+.chart-focus-guard :is(
+  .recharts-wrapper,
+  .recharts-wrapper *,
+  .recharts-surface,
+  .recharts-surface *,
+  .recharts-tooltip-wrapper,
+  .recharts-tooltip-wrapper *,
+  svg,
+  svg *
+):focus,
+.chart-focus-guard :is(
+  .recharts-wrapper,
+  .recharts-wrapper *,
+  .recharts-surface,
+  .recharts-surface *,
+  .recharts-tooltip-wrapper,
+  .recharts-tooltip-wrapper *,
+  svg,
+  svg *
+):focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
